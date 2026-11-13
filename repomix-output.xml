@@ -82,7 +82,22 @@ android/
   gradle.properties
   settings.gradle.kts
 backend/
+  conferir_dashboard.sql
   DashboardController.java
+  DashboardService.java
+  DashboardServiceTest.java
+  EmprestimoController.java
+  EmprestimoRepository.java
+  EmprestimoService.java
+  EmprestimoServiceTest.java
+  EpiRepository.java
+  FuncionarioController.java
+  FuncionarioControllerTest.java
+  FuncionarioRepository.java
+  Treinamento.java
+  TreinamentoRealizadoRepository.java
+  TreinamentoService.java
+  TreinamentoServiceTest.java
 ios/
   Flutter/
     AppFrameworkInfo.plist
@@ -141,21 +156,26 @@ ios/
 lib/
   src/
     models/
+      dashboard.dart
       emprestimo.dart
       epi.dart
       funcionario.dart
+      resumo_funcionario.dart
       treinamento_realizado.dart
       treinamento.dart
       usuario.dart
     screens/
       cadastrar_treinamento_screen.dart
+      dashboard_funcionario_screen.dart
       dashboard_screen.dart
       epi_detalhe_screen.dart
       epi_screen.dart
       funcionario_screen.dart
+      historico_funcionario_screen.dart
       login_screen.dart
       main_screen.dart
       meus_emprestimos_screen.dart
+      solicitacoes_screen.dart
       treinamentos_Screen.dart
     services/
       api_config.dart
@@ -164,6 +184,7 @@ lib/
       emprestimo_service.dart
       epi_service.dart
       funcionario_service.dart
+      resumo_funcionario_service.dart
       treinamento_Service.dart
     widgets/
       indicador_card.dart
@@ -225,6 +246,8 @@ macos/
     RunnerTests.swift
   .gitignore
 test/
+  dashboard_aula7_test.dart
+  funcionario_dashboard_test.dart
   widget_test.dart
 web/
   icons/
@@ -559,72 +582,760 @@ plugins {
 include(":app")
 </file>
 
+<file path="backend/conferir_dashboard.sql">
+-- Aula 7: executar no banco epi_db e comparar com GET /dashboard?adminId=1.
+SELECT
+    (SELECT COUNT(*) FROM epi) AS episCadastrados,
+    (SELECT COUNT(*) FROM emprestimo WHERE status = 'EMPRESTADO') AS episEmprestados,
+    (SELECT COUNT(*) FROM emprestimo WHERE status = 'DEVOLVIDO') AS episDevolvidos,
+    (SELECT COUNT(*) FROM epi WHERE validade_ca < CURDATE()) AS caVencidos,
+    (SELECT COUNT(*) FROM emprestimo WHERE status = 'SOLICITADO') AS solicitacoesPendentes,
+    GREATEST(0,
+        (SELECT COUNT(*) FROM funcionario) * (SELECT COUNT(*) FROM treinamento)
+        - (SELECT COUNT(*) FROM treinamento_realizado)) AS treinamentosPendentes,
+    (SELECT COUNT(*) FROM funcionario) AS funcionariosCadastrados,
+    (SELECT COUNT(*) FROM epi WHERE quantidade_disponivel <= 2) AS estoqueBaixo;
+</file>
+
 <file path="backend/DashboardController.java">
 package com.senac.api_epi.controllers;
 
-import jakarta.persistence.EntityManager;
+import com.senac.api_epi.service.DashboardService;
 import org.springframework.http.HttpStatus;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.server.ResponseStatusException;
-
-import java.time.LocalDate;
-import java.util.List;
-import java.util.Map;
 
 @RestController
 @RequestMapping("/dashboard")
-@Transactional(readOnly = true)
 public class DashboardController {
-    private final EntityManager em;
+    private final DashboardService service;
 
-    public DashboardController(EntityManager em) {
-        this.em = em;
+    public DashboardController(DashboardService service) {
+        this.service = service;
+    }
+
+    @GetMapping
+    public ResponseEntity<?> indicadores(@RequestParam Long adminId) {
+        try {
+            return ResponseEntity.ok(service.indicadores(adminId));
+        } catch (SecurityException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+        }
+    }
+}
+</file>
+
+<file path="backend/DashboardService.java">
+package com.senac.api_epi.service;
+
+import com.senac.api_epi.entities.Funcionario;
+import com.senac.api_epi.repositories.*;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import java.time.LocalDate;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+@Service
+@Transactional(readOnly = true)
+public class DashboardService {
+    private final EpiRepository epiRepository;
+    private final EmprestimoRepository emprestimoRepository;
+    private final FuncionarioRepository funcionarioRepository;
+    private final TreinamentoRepository treinamentoRepository;
+    private final TreinamentoRealizadoRepository realizadoRepository;
+
+    public DashboardService(EpiRepository epiRepository, EmprestimoRepository emprestimoRepository,
+                            FuncionarioRepository funcionarioRepository, TreinamentoRepository treinamentoRepository,
+                            TreinamentoRealizadoRepository realizadoRepository) {
+        this.epiRepository = epiRepository;
+        this.emprestimoRepository = emprestimoRepository;
+        this.funcionarioRepository = funcionarioRepository;
+        this.treinamentoRepository = treinamentoRepository;
+        this.realizadoRepository = realizadoRepository;
+    }
+
+    public Map<String, Long> indicadores(Long adminId) {
+        verificarAdmin(adminId);
+        long funcionarios = funcionarioRepository.count();
+        long treinamentos = treinamentoRepository.count();
+        long realizados = realizadoRepository.count();
+        // Fórmula da Aula 7. O piso zero acomoda históricos de renovação do projeto existente.
+        long pendentes = Math.max(0L, funcionarios * treinamentos - realizados);
+        Map<String, Long> dados = new LinkedHashMap<>();
+        dados.put("episCadastrados", epiRepository.count());
+        dados.put("episEmprestados", emprestimoRepository.countByStatus("EMPRESTADO"));
+        dados.put("episDevolvidos", emprestimoRepository.countByStatus("DEVOLVIDO"));
+        dados.put("caVencidos", epiRepository.countByValidadeCaBefore(LocalDate.now()));
+        dados.put("solicitacoesPendentes", emprestimoRepository.countByStatus("SOLICITADO"));
+        dados.put("treinamentosPendentes", pendentes);
+        // Exercícios 1 e 2 da página 18.
+        dados.put("funcionariosCadastrados", funcionarios);
+        dados.put("estoqueBaixo", epiRepository.countByQuantidadeDisponivelLessThanEqual(2));
+        return dados;
     }
 
     private void verificarAdmin(Long adminId) {
-        Long total = em.createQuery("select count(f) from Funcionario f where f.id = :id and upper(trim(f.perfil)) = 'ADMIN'", Long.class)
-                .setParameter("id", adminId).getSingleResult();
-        if (total == 0) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Apenas administradores podem consultar o painel");
+        Funcionario usuario = funcionarioRepository.findById(adminId)
+                .orElseThrow(() -> new SecurityException("Usuário não encontrado"));
+        if (!"ADMIN".equalsIgnoreCase(usuario.getPerfil().trim())) {
+            throw new SecurityException("Apenas administradores podem ver o painel");
         }
     }
+}
+</file>
 
-    private static final String PENDENCIAS = " from Funcionario f, Treinamento t where upper(trim(f.perfil)) <> 'ADMIN' and not exists (select r.id from TreinamentoRealizado r where r.funcionario = f and r.treinamento = t)";
+<file path="backend/DashboardServiceTest.java">
+package com.senac.api_epi;
+
+import com.senac.api_epi.entities.Funcionario;
+import com.senac.api_epi.repositories.*;
+import com.senac.api_epi.service.DashboardService;
+import com.senac.api_epi.controllers.DashboardController;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import java.time.LocalDate;
+import java.util.*;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class DashboardServiceTest {
+    private final EpiRepository epis = mock(EpiRepository.class);
+    private final EmprestimoRepository emprestimos = mock(EmprestimoRepository.class);
+    private final FuncionarioRepository funcionarios = mock(FuncionarioRepository.class);
+    private final TreinamentoRepository treinamentos = mock(TreinamentoRepository.class);
+    private final TreinamentoRealizadoRepository realizados = mock(TreinamentoRealizadoRepository.class);
+    private final DashboardService service = new DashboardService(epis, emprestimos, funcionarios, treinamentos, realizados);
+
+    @BeforeEach
+    void preparar() {
+        Funcionario admin = new Funcionario();
+        admin.setPerfil("ADMIN");
+        when(funcionarios.findById(1L)).thenReturn(Optional.of(admin));
+    }
+
+    @Test
+    void contratoEFormulaDaAulaSeteComExercicios() {
+        when(funcionarios.count()).thenReturn(3L);
+        when(treinamentos.count()).thenReturn(4L);
+        when(realizados.count()).thenReturn(2L);
+        when(epis.count()).thenReturn(8L);
+        when(emprestimos.countByStatus("EMPRESTADO")).thenReturn(2L);
+        when(emprestimos.countByStatus("DEVOLVIDO")).thenReturn(1L);
+        when(emprestimos.countByStatus("SOLICITADO")).thenReturn(1L);
+        when(epis.countByValidadeCaBefore(LocalDate.now())).thenReturn(1L);
+        when(epis.countByQuantidadeDisponivelLessThanEqual(2)).thenReturn(2L);
+        Map<String, Long> dados = service.indicadores(1L);
+        assertInstanceOf(LinkedHashMap.class, dados);
+        assertEquals(List.of("episCadastrados", "episEmprestados", "episDevolvidos", "caVencidos", "solicitacoesPendentes", "treinamentosPendentes", "funcionariosCadastrados", "estoqueBaixo"), new ArrayList<>(dados.keySet()));
+        assertEquals(10L, dados.get("treinamentosPendentes"));
+        assertEquals(8L, dados.get("episCadastrados"));
+        assertEquals(2L, dados.get("estoqueBaixo"));
+        verify(epis, never()).findAll();
+        verify(emprestimos, never()).findAll();
+    }
+
+    @Test
+    void funcionarioRecebe403SemExecutarContagens() {
+        Funcionario funcionario = new Funcionario();
+        funcionario.setPerfil("FUNCIONARIO");
+        when(funcionarios.findById(2L)).thenReturn(Optional.of(funcionario));
+        assertEquals(403, new DashboardController(service).indicadores(2L).getStatusCode().value());
+        verifyNoInteractions(epis, emprestimos, treinamentos, realizados);
+    }
+
+    @Test
+    void historicoDeRenovacaoNaoProduzIndicadorNegativo() {
+        when(funcionarios.count()).thenReturn(1L);
+        when(treinamentos.count()).thenReturn(1L);
+        when(realizados.count()).thenReturn(3L);
+        assertEquals(0L, service.indicadores(1L).get("treinamentosPendentes"));
+    }
+}
+</file>
+
+<file path="backend/EmprestimoController.java">
+package com.senac.api_epi.controllers;
+
+import com.senac.api_epi.entities.Emprestimo;
+import com.senac.api_epi.service.EmprestimoService;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import java.util.List;
+import java.util.function.Supplier;
+
+@RestController
+@RequestMapping("/emprestimos")
+public class EmprestimoController {
+    private final EmprestimoService service;
+    public EmprestimoController(EmprestimoService service) { this.service = service; }
+
+    @PostMapping
+    public ResponseEntity<?> solicitar(@RequestBody Emprestimo pedido) {
+        return responder(() -> service.solicitar(pedido), HttpStatus.CREATED);
+    }
+
+    @GetMapping("/funcionario/{id}")
+    public List<Emprestimo> listarPorFuncionario(@PathVariable Long id) {
+        return service.listarPorFuncionario(id);
+    }
 
     @GetMapping
-    public Map<String, Long> indicadores(@RequestParam Long adminId) {
+    public ResponseEntity<?> listar(@RequestParam Long adminId) {
+        return responder(() -> service.listar(adminId), HttpStatus.OK);
+    }
+
+    @PutMapping("/{id}/aprovar")
+    public ResponseEntity<?> aprovar(@PathVariable Long id, @RequestParam Long adminId) {
+        return responder(() -> service.aprovar(id, adminId), HttpStatus.OK);
+    }
+
+    @PutMapping("/{id}/devolver")
+    public ResponseEntity<?> devolver(@PathVariable Long id, @RequestParam Long adminId) {
+        return responder(() -> service.devolver(id, adminId), HttpStatus.OK);
+    }
+
+    private ResponseEntity<?> responder(Supplier<?> operacao, HttpStatus sucesso) {
+        try { return ResponseEntity.status(sucesso).body(operacao.get()); }
+        catch (SecurityException e) { return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage()); }
+        catch (IllegalArgumentException e) { return ResponseEntity.badRequest().body(e.getMessage()); }
+    }
+}
+</file>
+
+<file path="backend/EmprestimoRepository.java">
+package com.senac.api_epi.repositories;
+
+import com.senac.api_epi.entities.Emprestimo;
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.*;
+import org.springframework.data.repository.query.Param;
+import java.util.List;
+import java.util.Optional;
+
+public interface EmprestimoRepository extends JpaRepository<Emprestimo, Long> {
+    List<Emprestimo> findByFuncionarioIdOrderByIdDesc(Long funcionarioId);
+    boolean existsByFuncionarioIdAndEpiIdAndStatus(Long funcionarioId, Long epiId, String status);
+    long countByStatus(String status);
+    List<Emprestimo> findAllByOrderByIdDesc();
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select e from Emprestimo e where e.id = :id")
+    Optional<Emprestimo> buscarParaMovimentacao(@Param("id") Long id);
+}
+</file>
+
+<file path="backend/EmprestimoService.java">
+package com.senac.api_epi.service;
+
+import com.senac.api_epi.entities.*;
+import com.senac.api_epi.repositories.*;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import java.time.LocalDate;
+import java.util.List;
+
+@Service
+public class EmprestimoService {
+    private final EmprestimoRepository emprestimoRepository;
+    private final FuncionarioRepository funcionarioRepository;
+    private final EpiRepository epiRepository;
+
+    public EmprestimoService(EmprestimoRepository emprestimoRepository,
+                             FuncionarioRepository funcionarioRepository, EpiRepository epiRepository) {
+        this.emprestimoRepository = emprestimoRepository;
+        this.funcionarioRepository = funcionarioRepository;
+        this.epiRepository = epiRepository;
+    }
+
+    public Emprestimo solicitar(Emprestimo pedido) {
+        if (pedido.getFuncionario() == null || pedido.getFuncionario().getId() == null ||
+                pedido.getEpi() == null || pedido.getEpi().getId() == null) {
+            throw new IllegalArgumentException("Informe o funcionário e o EPI");
+        }
+        Funcionario funcionario = funcionarioRepository.findById(pedido.getFuncionario().getId())
+                .orElseThrow(() -> new IllegalArgumentException("Funcionário não encontrado"));
+        Epi epi = epiRepository.findById(pedido.getEpi().getId())
+                .orElseThrow(() -> new IllegalArgumentException("EPI não encontrado"));
+        validarDisponibilidade(epi);
+        if (emprestimoRepository.existsByFuncionarioIdAndEpiIdAndStatus(funcionario.getId(), epi.getId(), "SOLICITADO")) {
+            throw new IllegalArgumentException("Você já tem uma solicitação aberta para este EPI");
+        }
+        pedido.setId(null);
+        pedido.setFuncionario(funcionario);
+        pedido.setEpi(epi);
+        pedido.setDataEmprestimo(LocalDate.now());
+        pedido.setDataDevolucao(null);
+        pedido.setStatus("SOLICITADO");
+        return emprestimoRepository.save(pedido);
+    }
+
+    public List<Emprestimo> listarPorFuncionario(Long funcionarioId) {
+        return emprestimoRepository.findByFuncionarioIdOrderByIdDesc(funcionarioId);
+    }
+
+    public List<Emprestimo> listar(Long adminId) {
         verificarAdmin(adminId);
-        return Map.of(
-                "caVencidos", em.createQuery("select count(e) from Epi e where e.validadeCa < :hoje", Long.class).setParameter("hoje", LocalDate.now()).getSingleResult(),
-                "pedidosPendentes", contarStatus("SOLICITADO"),
-                "episEmprestados", contarStatus("EMPRESTADO"),
-                "treinamentosPendentes", em.createQuery("select count(t)" + PENDENCIAS, Long.class).getSingleResult());
+        return emprestimoRepository.findAllByOrderByIdDesc();
     }
 
-    private Long contarStatus(String status) {
-        return em.createQuery("select count(e) from Emprestimo e where e.status = :status", Long.class)
-                .setParameter("status", status).getSingleResult();
-    }
-
-    @GetMapping("/{indicador}")
-    public List<Map<String, Object>> detalhes(@PathVariable String indicador, @RequestParam Long adminId) {
+    @Transactional
+    public Emprestimo aprovar(Long id, Long adminId) {
         verificarAdmin(adminId);
-        return switch (indicador) {
-            case "caVencidos" -> em.createQuery("select e.nome, e.ca, e.validadeCa from Epi e where e.validadeCa < :hoje order by e.validadeCa", Object[].class)
-                    .setParameter("hoje", LocalDate.now()).getResultList().stream()
-                    .map(r -> linha(r[0], "CA " + r[1] + " • Validade: " + r[2])).toList();
-            case "pedidosPendentes", "episEmprestados" -> em.createQuery("select e.epi.nome, e.funcionario.nome, e.dataEmprestimo from Emprestimo e where e.status = :status order by e.id desc", Object[].class)
-                    .setParameter("status", indicador.equals("pedidosPendentes") ? "SOLICITADO" : "EMPRESTADO")
-                    .getResultList().stream().map(r -> linha(r[0], r[1] + " • Solicitação: " + r[2])).toList();
-            case "treinamentosPendentes" -> em.createQuery("select t.titulo, f.nome" + PENDENCIAS + " order by f.nome, t.titulo", Object[].class)
-                    .getResultList().stream().map(r -> linha(r[0], r[1])).toList();
-            default -> throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Indicador não encontrado");
-        };
+        Emprestimo pedido = buscarBloqueado(id);
+        if (!"SOLICITADO".equals(pedido.getStatus())) {
+            throw new IllegalArgumentException("Somente solicitações pendentes podem ser aprovadas");
+        }
+        Epi epi = epiRepository.buscarParaMovimentacao(pedido.getEpi().getId())
+                .orElseThrow(() -> new IllegalArgumentException("EPI não encontrado"));
+        validarDisponibilidade(epi);
+        epi.setQuantidadeDisponivel(epi.getQuantidadeDisponivel() - 1);
+        epiRepository.save(epi);
+        pedido.setStatus("EMPRESTADO");
+        return emprestimoRepository.save(pedido);
     }
 
-    private Map<String, Object> linha(Object titulo, Object descricao) {
-        return Map.of("titulo", titulo, "descricao", descricao);
+    @Transactional
+    public Emprestimo devolver(Long id, Long adminId) {
+        verificarAdmin(adminId);
+        Emprestimo pedido = buscarBloqueado(id);
+        if (!"EMPRESTADO".equals(pedido.getStatus())) {
+            throw new IllegalArgumentException("Somente EPIs emprestados podem ser devolvidos");
+        }
+        Epi epi = epiRepository.buscarParaMovimentacao(pedido.getEpi().getId())
+                .orElseThrow(() -> new IllegalArgumentException("EPI não encontrado"));
+        epi.setQuantidadeDisponivel(epi.getQuantidadeDisponivel() + 1);
+        epiRepository.save(epi);
+        pedido.setStatus("DEVOLVIDO");
+        pedido.setDataDevolucao(LocalDate.now());
+        return emprestimoRepository.save(pedido);
+    }
+
+    private Emprestimo buscarBloqueado(Long id) {
+        return emprestimoRepository.buscarParaMovimentacao(id)
+                .orElseThrow(() -> new IllegalArgumentException("Empréstimo não encontrado"));
+    }
+
+    private void validarDisponibilidade(Epi epi) {
+        if (epi.isCaVencido()) throw new IllegalArgumentException("EPI com CA vencido não pode ser emprestado");
+        if (epi.getQuantidadeDisponivel() <= 0) throw new IllegalArgumentException("EPI sem estoque disponível");
+    }
+
+    private void verificarAdmin(Long adminId) {
+        Funcionario usuario = funcionarioRepository.findById(adminId)
+                .orElseThrow(() -> new SecurityException("Usuário não encontrado"));
+        if (!"ADMIN".equalsIgnoreCase(usuario.getPerfil().trim())) {
+            throw new SecurityException("Apenas administradores podem gerenciar empréstimos");
+        }
+    }
+}
+</file>
+
+<file path="backend/EmprestimoServiceTest.java">
+package com.senac.api_epi;
+
+import com.senac.api_epi.entities.*;
+import com.senac.api_epi.repositories.*;
+import com.senac.api_epi.service.EmprestimoService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import java.time.LocalDate;
+import java.util.Optional;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class EmprestimoServiceTest {
+    private final EpiRepository epis = mock(EpiRepository.class);
+    private final EmprestimoRepository emprestimos = mock(EmprestimoRepository.class);
+    private final FuncionarioRepository funcionarios = mock(FuncionarioRepository.class);
+    private final EmprestimoService service = new EmprestimoService(emprestimos, funcionarios, epis);
+    private Epi epi;
+    private Emprestimo pedido;
+
+    @BeforeEach
+    void preparar() {
+        Funcionario admin = new Funcionario();
+        admin.setPerfil("ADMIN");
+        when(funcionarios.findById(1L)).thenReturn(Optional.of(admin));
+        epi = new Epi();
+        epi.setId(1L);
+        epi.setValidadeCa(LocalDate.now().plusYears(1));
+        epi.setQuantidadeDisponivel(2);
+        pedido = new Emprestimo();
+        pedido.setId(9L);
+        pedido.setEpi(epi);
+        pedido.setStatus("SOLICITADO");
+        when(emprestimos.buscarParaMovimentacao(9L)).thenReturn(Optional.of(pedido));
+        when(epis.buscarParaMovimentacao(1L)).thenReturn(Optional.of(epi));
+        when(emprestimos.save(any())).thenAnswer(i -> i.getArgument(0));
+    }
+
+    @Test
+    void aprovarEDepoisDevolverAtualizaStatusEEstoque() {
+        service.aprovar(9L, 1L);
+        assertEquals("EMPRESTADO", pedido.getStatus());
+        assertEquals(1, epi.getQuantidadeDisponivel());
+        service.devolver(9L, 1L);
+        assertEquals("DEVOLVIDO", pedido.getStatus());
+        assertEquals(2, epi.getQuantidadeDisponivel());
+        assertEquals(LocalDate.now(), pedido.getDataDevolucao());
+    }
+
+    @Test
+    void naoAprovaDuasVezes() {
+        service.aprovar(9L, 1L);
+        assertThrows(IllegalArgumentException.class, () -> service.aprovar(9L, 1L));
+        assertEquals(1, epi.getQuantidadeDisponivel());
+    }
+
+    @Test
+    void naoDevolveDuasVezes() {
+        pedido.setStatus("EMPRESTADO");
+        service.devolver(9L, 1L);
+        assertThrows(IllegalArgumentException.class, () -> service.devolver(9L, 1L));
+        assertEquals(3, epi.getQuantidadeDisponivel());
+    }
+
+    @Test
+    void naoAprovaCaVencido() {
+        epi.setValidadeCa(LocalDate.now().minusDays(1));
+        assertThrows(IllegalArgumentException.class, () -> service.aprovar(9L, 1L));
+        verify(emprestimos, never()).save(any());
+        assertEquals(2, epi.getQuantidadeDisponivel());
+    }
+
+    @Test
+    void naoAprovaSemEstoque() {
+        epi.setQuantidadeDisponivel(0);
+        assertThrows(IllegalArgumentException.class, () -> service.aprovar(9L, 1L));
+        verify(emprestimos, never()).save(any());
+    }
+
+    @Test
+    void funcionarioNaoPodeAprovarNemDevolver() {
+        Funcionario usuario = new Funcionario();
+        usuario.setPerfil("FUNCIONARIO");
+        when(funcionarios.findById(2L)).thenReturn(Optional.of(usuario));
+        assertThrows(SecurityException.class, () -> service.aprovar(9L, 2L));
+        assertThrows(SecurityException.class, () -> service.devolver(9L, 2L));
+        verifyNoInteractions(epis, emprestimos);
+    }
+}
+</file>
+
+<file path="backend/EpiRepository.java">
+package com.senac.api_epi.repositories;
+
+import com.senac.api_epi.entities.Epi;
+import jakarta.persistence.LockModeType;
+import org.springframework.data.jpa.repository.*;
+import org.springframework.data.repository.query.Param;
+import java.time.LocalDate;
+import java.util.Optional;
+
+public interface EpiRepository extends JpaRepository<Epi, Long> {
+    long countByValidadeCaBefore(LocalDate data);
+    long countByQuantidadeDisponivelLessThanEqual(int limite);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select e from Epi e where e.id = :id")
+    Optional<Epi> buscarParaMovimentacao(@Param("id") Long id);
+}
+</file>
+
+<file path="backend/FuncionarioController.java">
+package com.senac.api_epi.controllers;
+
+import com.senac.api_epi.entities.Funcionario;
+import com.senac.api_epi.repositories.FuncionarioRepository;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
+import java.util.List;
+
+@RestController
+public class FuncionarioController {
+    private final FuncionarioRepository repository;
+
+    public FuncionarioController(FuncionarioRepository repository) {
+        this.repository = repository;
+    }
+
+    @GetMapping("/funcionarios")
+    public List<Funcionario> listar(@RequestParam Long adminId) {
+        Funcionario usuario = repository.findById(adminId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN, "Acesso restrito"));
+        if (!"ADMIN".equalsIgnoreCase(usuario.getPerfil().trim())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Apenas administradores podem listar funcionários");
+        }
+        return repository.findAll();
+    }
+}
+</file>
+
+<file path="backend/FuncionarioControllerTest.java">
+package com.senac.api_epi;
+
+import com.senac.api_epi.controllers.FuncionarioController;
+import com.senac.api_epi.entities.Funcionario;
+import com.senac.api_epi.repositories.FuncionarioRepository;
+import org.junit.jupiter.api.Test;
+import org.springframework.web.server.ResponseStatusException;
+import java.util.List;
+import java.util.Optional;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class FuncionarioControllerTest {
+    @Test
+    void funcionarioNaoPodeListarOutrosFuncionarios() {
+        FuncionarioRepository repo = mock(FuncionarioRepository.class);
+        Funcionario usuario = new Funcionario();
+        usuario.setPerfil("FUNCIONARIO");
+        when(repo.findById(7L)).thenReturn(Optional.of(usuario));
+        ResponseStatusException erro = assertThrows(ResponseStatusException.class,
+                () -> new FuncionarioController(repo).listar(7L));
+        assertEquals(403, erro.getStatusCode().value());
+        verify(repo, never()).findAll();
+    }
+
+    @Test
+    void administradorPodeListar() {
+        FuncionarioRepository repo = mock(FuncionarioRepository.class);
+        Funcionario usuario = new Funcionario();
+        usuario.setPerfil("ADMIN");
+        when(repo.findById(1L)).thenReturn(Optional.of(usuario));
+        when(repo.findAll()).thenReturn(List.of(usuario));
+        assertEquals(1, new FuncionarioController(repo).listar(1L).size());
+    }
+}
+</file>
+
+<file path="backend/FuncionarioRepository.java">
+package com.senac.api_epi.repositories;
+import com.senac.api_epi.entities.Funcionario;
+import org.springframework.data.jpa.repository.JpaRepository;
+import java.util.Optional;
+
+
+public interface FuncionarioRepository extends JpaRepository<Funcionario, Long> {
+    Optional<Funcionario> findByMatricula(String matricula);
+
+    Optional<Funcionario> findByMatriculaAndSenha(
+            String matricula,
+            String senha);
+
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @org.springframework.data.jpa.repository.Query("select f from Funcionario f where f.id = :id")
+    Optional<Funcionario> buscarParaConclusao(@org.springframework.data.repository.query.Param("id") Long id);
+}
+</file>
+
+<file path="backend/Treinamento.java">
+package com.senac.api_epi.entities;
+
+import jakarta.persistence .*;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Entity
+public class Treinamento {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, length = 120)
+    private String titulo;
+
+    @Column(length = 500)
+    private String descricao;
+
+    // Caminho do material, igual ao imagemUrl do EPI:
+// /arquivos/nr06.pdf
+    @Column(length = 200)
+    private String arquivoUrl;
+
+    // Null significa treinamento sem prazo de validade.
+    private Integer validadeMeses;
+}
+</file>
+
+<file path="backend/TreinamentoRealizadoRepository.java">
+package com.senac.api_epi.repositories;
+
+import com.senac.api_epi.entities.TreinamentoRealizado;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.List;
+
+public interface TreinamentoRealizadoRepository
+        extends JpaRepository<TreinamentoRealizado, Long> {
+
+    // Treinamentos que um funcionario ja concluiu (mais recente primeiro)
+    List<TreinamentoRealizado> findByFuncionarioIdOrderByDataConclusaoDesc(
+            Long funcionarioId);
+
+    // Este funcionario já concluiu este treinamento?
+    boolean existsByFuncionarioIdAndTreinamentoId(
+            Long funcionarioId,
+            Long treinamentoId);
+
+    java.util.Optional<TreinamentoRealizado> findFirstByFuncionarioIdAndTreinamentoIdOrderByDataConclusaoDescIdDesc(Long funcionarioId, Long treinamentoId);
+}
+</file>
+
+<file path="backend/TreinamentoService.java">
+package com.senac.api_epi.service;
+
+import com.senac.api_epi.entities.Funcionario;
+import com.senac.api_epi.entities.Treinamento;
+import com.senac.api_epi.entities.TreinamentoRealizado;
+import com.senac.api_epi.repositories.FuncionarioRepository;
+import com.senac.api_epi.repositories.TreinamentoRealizadoRepository;
+import com.senac.api_epi.repositories.TreinamentoRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDate;
+import java.util.List;
+
+@Service
+public class TreinamentoService {
+    private final TreinamentoRepository treinamentoRepository;
+    private final TreinamentoRealizadoRepository realizadoRepository;
+    private final FuncionarioRepository funcionarioRepository;
+
+    public TreinamentoService(TreinamentoRepository treinamentoRepository,
+                             TreinamentoRealizadoRepository realizadoRepository,
+                             FuncionarioRepository funcionarioRepository) {
+        this.treinamentoRepository = treinamentoRepository;
+        this.realizadoRepository = realizadoRepository;
+        this.funcionarioRepository = funcionarioRepository;
+    }
+
+    public List<Treinamento> listar() {
+        return treinamentoRepository.findAllByOrderByTituloAsc();
+    }
+
+    public Treinamento cadastrar(Treinamento treinamento, Long adminId) {
+        verificarAdmin(adminId);
+        if (treinamento.getTitulo() == null || treinamento.getTitulo().isBlank()) {
+            throw new IllegalArgumentException("Informe o título do treinamento");
+        }
+        if (treinamento.getValidadeMeses() != null && treinamento.getValidadeMeses() <= 0) {
+            throw new IllegalArgumentException("A validade deve ser maior que zero");
+        }
+        treinamento.setId(null);
+        return treinamentoRepository.save(treinamento);
+    }
+
+    @Transactional
+    public TreinamentoRealizado concluir(Long treinamentoId, Long funcionarioId) {
+        // Serializa conclusões do mesmo funcionário para evitar renovações duplicadas.
+        Funcionario funcionario = funcionarioRepository.buscarParaConclusao(funcionarioId)
+                .orElseThrow(() -> new IllegalArgumentException("Funcionário não encontrado"));
+        Treinamento treinamento = treinamentoRepository.findById(treinamentoId)
+                .orElseThrow(() -> new IllegalArgumentException("Treinamento não encontrado"));
+
+        realizadoRepository.findFirstByFuncionarioIdAndTreinamentoIdOrderByDataConclusaoDescIdDesc(funcionarioId, treinamentoId)
+                .ifPresent(ultimo -> {
+                    Integer meses = treinamento.getValidadeMeses();
+                    if (meses == null || !ultimo.getDataConclusao().plusMonths(meses).isBefore(LocalDate.now())) {
+                        throw new IllegalArgumentException("Este treinamento já possui uma conclusão válida");
+                    }
+                });
+
+        TreinamentoRealizado registro = new TreinamentoRealizado();
+        registro.setFuncionario(funcionario);
+        registro.setTreinamento(treinamento);
+        registro.setDataConclusao(LocalDate.now());
+        // Cada renovação cria um novo registro e preserva o histórico.
+        return realizadoRepository.save(registro);
+    }
+
+    public List<TreinamentoRealizado> listarRealizados(Long funcionarioId) {
+        return realizadoRepository.findByFuncionarioIdOrderByDataConclusaoDesc(funcionarioId);
+    }
+
+    private void verificarAdmin(Long adminId) {
+        Funcionario usuario = funcionarioRepository.findById(adminId)
+                .orElseThrow(() -> new SecurityException("Usuário não encontrado"));
+        if (!"ADMIN".equalsIgnoreCase(usuario.getPerfil().trim())) {
+            throw new SecurityException("Apenas administradores podem fazer esta operação");
+        }
+    }
+}
+</file>
+
+<file path="backend/TreinamentoServiceTest.java">
+package com.senac.api_epi;
+
+import com.senac.api_epi.entities.*;
+import com.senac.api_epi.repositories.*;
+import com.senac.api_epi.service.TreinamentoService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import java.time.LocalDate;
+import java.util.Optional;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+class TreinamentoServiceTest {
+    private final TreinamentoRepository treinamentos = mock(TreinamentoRepository.class);
+    private final TreinamentoRealizadoRepository realizados = mock(TreinamentoRealizadoRepository.class);
+    private final FuncionarioRepository funcionarios = mock(FuncionarioRepository.class);
+    private final TreinamentoService service = new TreinamentoService(treinamentos, realizados, funcionarios);
+    private Treinamento treinamento;
+
+    @BeforeEach
+    void preparar() {
+        Funcionario funcionario = new Funcionario();
+        funcionario.setId(7L);
+        treinamento = new Treinamento();
+        treinamento.setId(1L);
+        treinamento.setValidadeMeses(12);
+        when(funcionarios.buscarParaConclusao(7L)).thenReturn(Optional.of(funcionario));
+        when(treinamentos.findById(1L)).thenReturn(Optional.of(treinamento));
+        when(realizados.save(any())).thenAnswer(invocacao -> invocacao.getArgument(0));
+    }
+
+    private void conclusaoEm(LocalDate data) {
+        TreinamentoRealizado anterior = new TreinamentoRealizado();
+        anterior.setDataConclusao(data);
+        when(realizados.findFirstByFuncionarioIdAndTreinamentoIdOrderByDataConclusaoDescIdDesc(7L, 1L))
+                .thenReturn(Optional.of(anterior));
+    }
+
+    @Test
+    void renovacaoVencidaCriaOutroRegistroSemApagarHistorico() {
+        conclusaoEm(LocalDate.now().minusYears(2));
+        TreinamentoRealizado novo = service.concluir(1L, 7L);
+        assertNull(novo.getId());
+        assertEquals(LocalDate.now(), novo.getDataConclusao());
+        verify(realizados).save(novo);
+        verify(realizados, never()).delete(any());
+    }
+
+    @Test
+    void conclusaoQueVenceHojeContinuaValida() {
+        conclusaoEm(LocalDate.now().minusMonths(12));
+        assertThrows(IllegalArgumentException.class, () -> service.concluir(1L, 7L));
+        verify(realizados, never()).save(any());
+    }
+
+    @Test
+    void semValidadeNaoPermiteConclusaoDuplicada() {
+        treinamento.setValidadeMeses(null);
+        conclusaoEm(LocalDate.now().minusYears(5));
+        assertThrows(IllegalArgumentException.class, () -> service.concluir(1L, 7L));
     }
 }
 </file>
@@ -1885,15 +2596,62 @@ Runner/GeneratedPluginRegistrant.*
 !default.perspectivev3
 </file>
 
+<file path="lib/src/models/dashboard.dart">
+class Dashboard {
+  final int episCadastrados;
+  final int episEmprestados;
+  final int episDevolvidos;
+  final int caVencidos;
+  final int solicitacoesPendentes;
+  final int treinamentosPendentes;
+  final int funcionariosCadastrados;
+  final int estoqueBaixo;
+
+  const Dashboard({
+    required this.episCadastrados,
+    required this.episEmprestados,
+    required this.episDevolvidos,
+    required this.caVencidos,
+    required this.solicitacoesPendentes,
+    required this.treinamentosPendentes,
+    required this.funcionariosCadastrados,
+    required this.estoqueBaixo,
+  });
+
+  factory Dashboard.fromJson(Map<String, dynamic> json) {
+    int ler(String chave) {
+      final valor = json[chave];
+      if (valor is! int || valor < 0) {
+        throw FormatException('Indicador inválido: $chave');
+      }
+      return valor;
+    }
+
+    return Dashboard(
+      episCadastrados: ler('episCadastrados'),
+      episEmprestados: ler('episEmprestados'),
+      episDevolvidos: ler('episDevolvidos'),
+      caVencidos: ler('caVencidos'),
+      solicitacoesPendentes: ler('solicitacoesPendentes'),
+      treinamentosPendentes: ler('treinamentosPendentes'),
+      funcionariosCadastrados: ler('funcionariosCadastrados'),
+      estoqueBaixo: ler('estoqueBaixo'),
+    );
+  }
+}
+</file>
+
 <file path="lib/src/models/emprestimo.dart">
 import 'epi.dart';
 
 class Emprestimo {
   final int id;
   final DateTime dataEmprestimo;
+  final DateTime? dataDevolucao;
   final String status;
   final String observacao;
   final Epi epi;
+  final String? funcionarioNome;
 
   Emprestimo({
     required this.id,
@@ -1901,15 +2659,22 @@ class Emprestimo {
     required this.status,
     required this.observacao,
     required this.epi,
+    this.dataDevolucao,
+    this.funcionarioNome,
   });
 
   factory Emprestimo.fromJson(Map<String, dynamic> json) {
     return Emprestimo(
       id: json['id'],
       dataEmprestimo: DateTime.parse(json['dataEmprestimo']),
+      dataDevolucao: json['dataDevolucao'] == null
+          ? null
+          : DateTime.parse(json['dataDevolucao']),
       status: json['status'],
       observacao: json['observacao'] ?? '',
       epi: Epi.fromJson(json['epi']),
+      funcionarioNome:
+          (json['funcionario'] as Map<String, dynamic>?)?['nome'] as String?,
     );
   }
 }
@@ -1997,6 +2762,62 @@ class Funcionario {
 }
 </file>
 
+<file path="lib/src/models/resumo_funcionario.dart">
+import 'emprestimo.dart';
+import 'treinamento.dart';
+import 'treinamento_realizado.dart';
+
+class ResumoFuncionario {
+  final List<Emprestimo> emprestimos;
+  final List<Treinamento> treinamentos;
+  final List<TreinamentoRealizado> realizados;
+
+  ResumoFuncionario({
+    required this.emprestimos,
+    required this.treinamentos,
+    required this.realizados,
+  });
+
+  List<Emprestimo> get emPosse =>
+      emprestimos.where((e) => e.status.toUpperCase() == 'EMPRESTADO').toList();
+  List<Emprestimo> get solicitados =>
+      emprestimos.where((e) => e.status.toUpperCase() == 'SOLICITADO').toList();
+  List<Emprestimo> get recebidos => emprestimos
+      .where(
+        (e) => ['EMPRESTADO', 'DEVOLVIDO'].contains(e.status.toUpperCase()),
+      )
+      .toList();
+
+  Map<int, int> get quantidadesEmPosse {
+    final quantidades = <int, int>{};
+    for (final e in emPosse) {
+      quantidades.update(e.epi.id, (valor) => valor + 1, ifAbsent: () => 1);
+    }
+    return quantidades;
+  }
+
+  Map<int, TreinamentoRealizado> get ultimasConclusoes {
+    final ultimas = <int, TreinamentoRealizado>{};
+    for (final r in realizados) {
+      final anterior = ultimas[r.treinamento.id];
+      if (anterior == null ||
+          r.dataConclusao.isAfter(anterior.dataConclusao) ||
+          (r.dataConclusao == anterior.dataConclusao && r.id > anterior.id)) {
+        ultimas[r.treinamento.id] = r;
+      }
+    }
+    return ultimas;
+  }
+
+  List<Treinamento> get pendentes {
+    final ultimas = ultimasConclusoes;
+    return treinamentos
+        .where((t) => ultimas[t.id] == null || ultimas[t.id]!.estaVencido)
+        .toList();
+  }
+}
+</file>
+
 <file path="lib/src/models/treinamento_realizado.dart">
 import 'package:app_epi/src/models/treinamento.dart';
 
@@ -2047,7 +2868,9 @@ class TreinamentoRealizado {
 
   bool get estaVencido {
     final vencimento = dataVencimento;
-    return vencimento != null && DateTime.now().isAfter(vencimento);
+    final agora = DateTime.now();
+    final hoje = DateTime(agora.year, agora.month, agora.day);
+    return vencimento != null && vencimento.isBefore(hoje);
   }
 
   String get dataFormatada {
@@ -2286,240 +3109,402 @@ class _CadastrarTreinamentoScreenState
 }
 </file>
 
-<file path="lib/src/screens/dashboard_screen.dart">
+<file path="lib/src/screens/dashboard_funcionario_screen.dart">
 import 'package:flutter/material.dart';
 
 import '../models/usuario.dart';
+import '../models/resumo_funcionario.dart';
+import '../services/resumo_funcionario_service.dart';
+import '../widgets/indicador_card.dart';
+import 'historico_funcionario_screen.dart';
+import 'treinamentos_Screen.dart';
+
+class DashboardFuncionarioScreen extends StatefulWidget {
+  final Usuario usuario;
+  const DashboardFuncionarioScreen({super.key, required this.usuario});
+  @override
+  State<DashboardFuncionarioScreen> createState() =>
+      _DashboardFuncionarioScreenState();
+}
+
+class _DashboardFuncionarioScreenState
+    extends State<DashboardFuncionarioScreen> {
+  late Future<ResumoFuncionario> dados;
+  @override
+  void initState() {
+    super.initState();
+    dados = carregar();
+  }
+
+  Future<ResumoFuncionario> carregar() =>
+      ResumoFuncionarioService().buscar(widget.usuario.id);
+  Future<void> atualizar() async {
+    final futuro = carregar();
+    setState(() {
+      dados = futuro;
+    });
+    try {
+      await futuro;
+    } catch (_) {
+      /* Exibido no FutureBuilder. */
+    }
+  }
+
+  Future<void> abrir(Widget tela) async {
+    await Navigator.of(context)
+        .push(MaterialPageRoute<void>(builder: (_) => tela));
+    if (mounted) await atualizar();
+  }
+
+  void consulta(ConsultaFuncionario tipo) => abrir(
+    HistoricoFuncionarioScreen(usuario: widget.usuario, consulta: tipo),
+  );
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<ResumoFuncionario>(
+    future: dados,
+    builder: (context, snapshot) {
+      if (snapshot.connectionState == ConnectionState.waiting) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      if (snapshot.hasError) {
+        return Center(
+          child: ElevatedButton(
+            onPressed: atualizar,
+            child: const Text('Falha ao carregar o painel. Tentar novamente'),
+          ),
+        );
+      }
+      final resumo = snapshot.requireData;
+      return RefreshIndicator(
+        onRefresh: atualizar,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(16),
+          children: [
+            Text(
+              'Olá, ${widget.usuario.nome}',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 8),
+            const Text('Acompanhe seus equipamentos e treinamentos.'),
+            const SizedBox(height: 16),
+            GridView.count(
+              crossAxisCount: 2,
+              mainAxisExtent: 200 * MediaQuery.textScalerOf(context).scale(1),
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              children: [
+                IndicadorCard(
+                  titulo: 'Meus EPIs em uso',
+                  valor: resumo.emPosse.length,
+                  icone: Icons.health_and_safety,
+                  cor: Colors.blue,
+                  onTap: () => consulta(ConsultaFuncionario.emPosse),
+                ),
+                IndicadorCard(
+                  titulo: 'Meus treinamentos pendentes',
+                  valor: resumo.pendentes.length,
+                  icone: Icons.school,
+                  cor: Colors.orange,
+                  onTap: () => abrir(
+                    TreinamentosScreen(
+                      usuario: widget.usuario,
+                      apenasPendentes: true,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Consultas e históricos',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            ListTile(
+              leading: const Icon(Icons.pending_actions),
+              title: const Text('Empréstimos solicitados'),
+              trailing: Text('${resumo.solicitados.length}'),
+              onTap: () => consulta(ConsultaFuncionario.solicitados),
+            ),
+            ListTile(
+              leading: const Icon(Icons.history),
+              title: const Text('Histórico de EPIs recebidos'),
+              trailing: Text('${resumo.recebidos.length}'),
+              onTap: () => consulta(ConsultaFuncionario.historicoEpis),
+            ),
+            ListTile(
+              leading: const Icon(Icons.fact_check),
+              title: const Text('Histórico de treinamentos'),
+              trailing: Text('${resumo.realizados.length}'),
+              onTap: () => consulta(ConsultaFuncionario.historicoTreinamentos),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: atualizar,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Atualizar'),
+              ),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}
+</file>
+
+<file path="lib/src/screens/dashboard_screen.dart">
+import 'package:flutter/material.dart';
+
+import '../models/dashboard.dart';
+import '../models/usuario.dart';
 import '../services/dashboard_service.dart';
 import '../widgets/indicador_card.dart';
+import 'epi_screen.dart';
+import 'funcionario_screen.dart';
+import 'solicitacoes_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   final Usuario usuario;
   const DashboardScreen({super.key, required this.usuario});
-
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  final service = DashboardService();
-  late Future<Map<String, int>> dados;
-
+  late Future<Dashboard> futuroDados;
+  DateTime? atualizadoEm;
   @override
   void initState() {
     super.initState();
-    dados = service.buscarIndicadores(widget.usuario.id);
+    futuroDados = buscar();
   }
 
-  Future<void> atualizar() async {
-    final futuro = service.buscarIndicadores(widget.usuario.id);
-    setState(() => dados = futuro);
+  Future<Dashboard> buscar() async {
+    final dados = await DashboardService().buscar(widget.usuario.id);
+    atualizadoEm = DateTime.now();
+    return dados;
+  }
+
+  Future<void> recarregar() async {
+    final futuro = buscar();
+    setState(() {
+      futuroDados = futuro;
+    });
     try {
       await futuro;
     } catch (_) {
-      /* O FutureBuilder apresenta o erro. */
+      /* Falha exibida abaixo. */
     }
   }
 
-  Future<void> abrir(String chave, String titulo) async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => _DetalhesIndicadorScreen(
-          adminId: widget.usuario.id,
-          indicador: chave,
-          titulo: titulo,
-        ),
-      ),
-    );
-    if (mounted) await atualizar();
+  Future<void> abrir(Widget tela) async {
+    await Navigator.of(context)
+        .push(MaterialPageRoute<void>(builder: (_) => tela));
+    if (mounted) await recarregar();
   }
+
+  String doisDigitos(int n) => n.toString().padLeft(2, '0');
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<Map<String, int>>(
-      future: dados,
+    final hoje = DateTime.now();
+    final colunas = MediaQuery.sizeOf(context).width >= 700 ? 3 : 2;
+    return FutureBuilder<Dashboard>(
+      future: futuroDados,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
         if (snapshot.hasError) {
           return Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text('Não foi possível carregar os indicadores.'),
-                const SizedBox(height: 12),
-                ElevatedButton.icon(
-                  onPressed: atualizar,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Tentar novamente'),
-                ),
-              ],
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    snapshot.error.toString().replaceFirst('Exception: ', ''),
+                  ),
+                  const SizedBox(height: 12),
+                  ElevatedButton.icon(
+                    onPressed: recarregar,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Tentar novamente'),
+                  ),
+                ],
+              ),
             ),
           );
         }
-        final valores = snapshot.requireData;
-        final indicadores = [
-          (
-            'caVencidos',
-            'EPIs com CA vencido',
-            Icons.warning_amber_rounded,
-            Colors.red,
-          ),
-          (
-            'pedidosPendentes',
-            'Pedidos aguardando aprovação',
-            Icons.pending_actions,
-            Colors.orange,
-          ),
-          (
-            'episEmprestados',
-            'EPIs com funcionários',
-            Icons.health_and_safety,
-            Colors.blue,
-          ),
-          (
-            'treinamentosPendentes',
-            'Treinamentos pendentes',
-            Icons.school,
-            Colors.purple,
-          ),
-        ];
+        final d = snapshot.requireData;
         return RefreshIndicator(
-          onRefresh: atualizar,
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final colunas = constraints.maxWidth >= 1100
-                  ? 4
-                  : constraints.maxWidth >= 600
-                  ? 2
-                  : 1;
-              final escala = MediaQuery.textScalerOf(context).scale(1);
-              return ListView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.all(20),
-                children: [
-                  Text(
-                    'Olá, ${widget.usuario.nome}',
-                    style: Theme.of(context).textTheme.headlineSmall,
+          onRefresh: recarregar,
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.all(16),
+            children: [
+              const Text(
+                'Painel de Segurança do Trabalho',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Olá, ${widget.usuario.nome} · ${doisDigitos(hoje.day)}/${doisDigitos(hoje.month)}/${hoje.year}',
+                style: TextStyle(color: Colors.grey.shade600),
+              ),
+              const SizedBox(height: 16),
+              if (d.caVencidos > 0)
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade50,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.red.shade200),
                   ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Visão geral da segurança • Toque nos cards para consultar as pendências.',
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.warning_amber_rounded,
+                        color: Colors.red.shade700,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          '${d.caVencidos} EPI(s) com CA vencido. Retire de uso e providencie a substituição.',
+                          style: TextStyle(color: Colors.red.shade800),
+                        ),
+                      ),
+                    ],
                   ),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton.icon(
-                      onPressed: atualizar,
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('Atualizar'),
-                    ),
-                  ),
-                  GridView.count(
+                ),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final larguraCard =
+                      (constraints.maxWidth - (colunas - 1) * 12) / colunas;
+                  final alturaBase = larguraCard / (colunas == 2 ? 0.95 : 1.6);
+                  // Mantém a proporção da aula, com altura mínima para telas estreitas e texto ampliado.
+                  final alturaMinima =
+                      175 * MediaQuery.textScalerOf(context).scale(1);
+                  return GridView.count(
                     crossAxisCount: colunas,
-                    mainAxisSpacing: 12,
                     crossAxisSpacing: 12,
-                    mainAxisExtent: 250 * escala,
+                    mainAxisSpacing: 12,
+                    mainAxisExtent: alturaBase < alturaMinima
+                        ? alturaMinima
+                        : alturaBase,
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
                     children: [
-                      for (final (chave, titulo, icone, cor) in indicadores)
-                        IndicadorCard(
-                          titulo: titulo,
-                          quantidade: valores[chave]!,
-                          icone: icone,
-                          cor: cor,
-                          onTap: () => abrir(chave, titulo),
+                      IndicadorCard(
+                        titulo: 'EPIs cadastrados',
+                        valor: d.episCadastrados,
+                        icone: Icons.inventory_2,
+                        cor: Colors.indigo,
+                        onTap: () => abrir(EpiScreen(usuario: widget.usuario)),
+                      ),
+                      IndicadorCard(
+                        titulo: 'EPIs emprestados',
+                        valor: d.episEmprestados,
+                        icone: Icons.outbox,
+                        cor: Colors.blue,
+                        onTap: () => abrir(
+                          SolicitacoesScreen(
+                            usuario: widget.usuario,
+                            statusInicial: 'EMPRESTADO',
+                          ),
                         ),
+                      ),
+                      IndicadorCard(
+                        titulo: 'EPIs devolvidos',
+                        valor: d.episDevolvidos,
+                        icone: Icons.assignment_return,
+                        cor: Colors.green,
+                        onTap: () => abrir(
+                          SolicitacoesScreen(
+                            usuario: widget.usuario,
+                            statusInicial: 'DEVOLVIDO',
+                          ),
+                        ),
+                      ),
+                      IndicadorCard(
+                        titulo: 'CA vencidos',
+                        valor: d.caVencidos,
+                        icone: Icons.gpp_bad,
+                        cor: Colors.red,
+                        onTap: () => abrir(
+                          EpiScreen(
+                            usuario: widget.usuario,
+                            apenasCaVencidos: true,
+                          ),
+                        ),
+                      ),
+                      IndicadorCard(
+                        titulo: 'Solicitações pendentes',
+                        valor: d.solicitacoesPendentes,
+                        icone: Icons.pending_actions,
+                        cor: Colors.amber,
+                        onTap: () =>
+                            abrir(SolicitacoesScreen(usuario: widget.usuario)),
+                      ),
+                      IndicadorCard(
+                        titulo: 'Treinamentos pendentes',
+                        valor: d.treinamentosPendentes,
+                        icone: Icons.school,
+                        cor: Colors.orange,
+                      ),
+                      IndicadorCard(
+                        titulo: 'Funcionários cadastrados',
+                        valor: d.funcionariosCadastrados,
+                        icone: Icons.people,
+                        cor: Colors.teal,
+                        onTap: () =>
+                            abrir(FuncionarioScreen(usuario: widget.usuario)),
+                      ),
+                      IndicadorCard(
+                        titulo: 'Estoque baixo',
+                        valor: d.estoqueBaixo,
+                        icone: Icons.inventory,
+                        cor: Colors.deepOrange,
+                        onTap: () => abrir(
+                          EpiScreen(
+                            usuario: widget.usuario,
+                            apenasEstoqueBaixo: true,
+                          ),
+                        ),
+                      ),
                     ],
+                  );
+                },
+              ),
+              const SizedBox(height: 16),
+              Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 16,
+                children: [
+                  Text(
+                    'Atualizado às ${doisDigitos(atualizadoEm!.hour)}:${doisDigitos(atualizadoEm!.minute)}',
+                    style: TextStyle(color: Colors.grey.shade600),
                   ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Treinamentos: pendências por funcionário, considerando todos os treinamentos obrigatórios para quem não é administrador.',
+                  TextButton.icon(
+                    onPressed: recarregar,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Atualizar'),
                   ),
                 ],
-              );
-            },
+              ),
+            ],
           ),
         );
       },
     );
   }
-}
-
-class _DetalhesIndicadorScreen extends StatefulWidget {
-  final int adminId;
-  final String indicador;
-  final String titulo;
-  const _DetalhesIndicadorScreen({
-    required this.adminId,
-    required this.indicador,
-    required this.titulo,
-  });
-  @override
-  State<_DetalhesIndicadorScreen> createState() =>
-      _DetalhesIndicadorScreenState();
-}
-
-class _DetalhesIndicadorScreenState extends State<_DetalhesIndicadorScreen> {
-  late Future<List<Map<String, dynamic>>> dados;
-  @override
-  void initState() {
-    super.initState();
-    dados = buscar();
-  }
-
-  Future<List<Map<String, dynamic>>> buscar() =>
-      DashboardService().buscarDetalhes(widget.adminId, widget.indicador);
-  Future<void> atualizar() async {
-    final futuro = buscar();
-    setState(() => dados = futuro);
-    try {
-      await futuro;
-    } catch (_) {
-      /* Erro apresentado abaixo. */
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: Text(widget.titulo)),
-    body: FutureBuilder<List<Map<String, dynamic>>>(
-      future: dados,
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (snapshot.hasError) {
-          return Center(
-            child: ElevatedButton(
-              onPressed: atualizar,
-              child: const Text('Falha ao carregar. Tentar novamente'),
-            ),
-          );
-        }
-        final itens = snapshot.requireData;
-        return RefreshIndicator(
-          onRefresh: atualizar,
-          child: ListView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.all(16),
-            children: itens.isEmpty
-                ? [const ListTile(title: Text('Nenhum registro encontrado.'))]
-                : [
-                    for (final item in itens)
-                      Card(
-                        child: ListTile(
-                          title: Text(item['titulo'] as String),
-                          subtitle: Text(item['descricao'] as String),
-                        ),
-                      ),
-                  ],
-          ),
-        );
-      },
-    ),
-  );
 }
 </file>
 
@@ -2559,9 +3544,7 @@ class _EpiDetalheScreenState extends State<EpiDetalheScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Confirmar solicitação'),
-        content: Text(
-          'Confirma a solicitação de "${widget.epi.nome}"?',
-        ),
+        content: Text('Confirma a solicitação de "${widget.epi.nome}"?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -2680,11 +3663,12 @@ class _EpiDetalheScreenState extends State<EpiDetalheScreen> {
                 epi.validadeFormatada,
                 cor: epi.caVencido ? Colors.red : null,
               ),
-              linhaInfo(
-                Icons.inventory_2,
-                'Disponível',
-                '${epi.quantidadeDisponivel} un.',
-              ),
+              if (widget.usuario.perfil.trim().toUpperCase() == 'ADMIN')
+                linhaInfo(
+                  Icons.inventory_2,
+                  'Disponível',
+                  '${epi.quantidadeDisponivel} un.',
+                ),
               const Divider(height: 30),
 
               // Formulário de solicitação
@@ -2786,170 +3770,178 @@ class _EpiDetalheScreenState extends State<EpiDetalheScreen> {
 import 'package:flutter/material.dart';
 
 import '../models/epi.dart';
+import '../models/emprestimo.dart';
 import '../models/usuario.dart';
 import '../services/api_config.dart';
 import '../services/epi_service.dart';
+import '../services/emprestimo_service.dart';
 import 'epi_detalhe_screen.dart';
 
-class EpiScreen extends StatelessWidget {
-  final Usuario usuario; // Aula 4 : recebe o usuario logado
-
+class EpiScreen extends StatefulWidget {
+  final Usuario usuario;
+  final bool apenasCaVencidos;
+  final bool apenasEstoqueBaixo;
   const EpiScreen({
     super.key,
-    required this.usuario, // Aula 4
-    });
-
+    required this.usuario,
+    this.apenasCaVencidos = false,
+    this.apenasEstoqueBaixo = false,
+  });
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Lista de EPIs'),
-        backgroundColor: Colors.blue,
-        foregroundColor: Colors.white,
+  State<EpiScreen> createState() => _EpiScreenState();
+}
 
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.close),
-            tooltip: 'Fechar',
-            onPressed: () {
-              Navigator.pop(context);
-            },
-          ),
-        ],
-      ),
-      
-      body: FutureBuilder<List<Epi>>(
-        // Busca os dados da API
-        future: EpiService().buscarEpis(),
-        builder: (context, snapshot) {
-          // Exibe indicador enquanto aguarda os dados
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          // Exibe erro caso ocorra
-          if (snapshot.hasError) {
-            return Center(child: Text('Erro: ${snapshot.error}'));
-          }
-          // Recebe a lista retornada pela API
-          final epis = snapshot.data ?? [];
+class _EpiScreenState extends State<EpiScreen> {
+  late Future<void> dados;
+  List<Epi> epis = [];
+  Map<int, int> emPosse = {};
+  bool get admin => widget.usuario.perfil.trim().toUpperCase() == 'ADMIN';
+  @override
+  void initState() {
+    super.initState();
+    dados = carregar();
+  }
 
-          return ListView.builder(
-            itemCount: epis.length,
-            itemBuilder: (context, index) {
-              final epi = epis[index];
-              final urlImagem = '${ApiConfig.baseUrl}${epi.imagemUrl}';
+  Future<void> carregar() async {
+    final resultados = await Future.wait<Object>([
+      EpiService().buscarEpis(),
+      if (!admin) EmprestimoService().buscarPorFuncionario(widget.usuario.id),
+    ]);
+    epis = resultados[0] as List<Epi>;
+    emPosse = {};
+    if (!admin) {
+      // Um registro de empréstimo ativo representa uma unidade em posse.
+      for (final emprestimo in resultados[1] as List<Emprestimo>) {
+        if (emprestimo.status.toUpperCase() == 'EMPRESTADO') {
+          final id = emprestimo.epi.id;
+          emPosse.update(id, (n) => n + 1, ifAbsent: () => 1);
+        }
+      }
+    }
+  }
 
-              // Exercício 3b: cor de destaque quando o CA está vencido
-              final corTexto = epi.caVencido ? Colors.red : Colors.black87;
+  Future<void> atualizar() async {
+    final futuro = carregar();
+    setState(() {
+      dados = futuro;
+    });
+    try {
+      await futuro;
+    } catch (_) {
+      /* O FutureBuilder apresenta o erro. */
+    }
+  }
 
-              return Card(
-                elevation: 3,
-                margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                color: epi.caVencido ? Colors.red.shade50 : null,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  side: epi.caVencido
-                      ? const BorderSide(color: Colors.red, width: 2)
-                      : BorderSide.none,
-                ),
-
-                child: ListTile(
-                  // Aula 4: ao tocar no EPI, abre a tela de detalhes
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => EpiDetalheScreen(
-                          epi: epi,
-                           usuario: usuario,
-                           ),
-                      ),
-                    );
-                  },
-                  
-                  leading: ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-
-                    child: Image.network(
-                      urlImagem,
-                      width: 55,
-                      height: 55,
-                      fit: BoxFit.cover,
-
-                      errorBuilder: (context, error, stackTrace) {
-                        return Container(
-                          width: 55,
-                          height: 55,
-                          color: Colors.blue.shade50,
-
-                          child: const Icon(
-                            Icons.health_and_safety,
-                            color: Colors.blue,
-                            size: 30,
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-
-                  title: Text(
-                    epi.nome,
-                    style: TextStyle(
-                      color: corTexto,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-
-                  isThreeLine: true,
-
-                  subtitle: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(epi.categoria),
-
-                      // Exercício 3b: CA e validade em vermelho se vencido
-                      Text(
-                        epi.caVencido
-                            ? 'CA: ${epi.ca} - VENCIDO em ${epi.validadeFormatada}'
-                            : 'CA: ${epi.ca} - válido até ${epi.validadeFormatada}',
-                        style: TextStyle(
-                          color: epi.caVencido ? Colors.red : null,
-                          fontWeight: epi.caVencido ? FontWeight.bold : null,
-                        ),
-                      ),
-
-                      // Exercício 3a: quantidade disponível
-                      Text(
-                        epi.quantidadeDisponivel > 0
-                            ? 'Disponível: ${epi.quantidadeDisponivel} un.'
-                            : 'Sem estoque',
-                        style: TextStyle(
-                          color: epi.quantidadeDisponivel > 0
-                              ? Colors.green.shade700
-                              : Colors.orange.shade800,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
-
-                  // Ícone de alerta à direita para o CA vencido
-                  trailing: epi.caVencido
-                      ? const Tooltip(
-                          message: 'CA vencido',
-                          child: Icon(Icons.warning_amber_rounded,
-                              color: Colors.red),
-                        )
-                      : null,
-                ),
-              );
-            },
-          );
-        },
+  Future<void> abrir(Epi epi) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => EpiDetalheScreen(epi: epi, usuario: widget.usuario),
       ),
     );
+    if (mounted) await atualizar();
   }
+
+  Widget card(Epi epi, {bool posse = false}) => Card(
+    color: epi.caVencido ? Colors.red.shade50 : null,
+    child: ListTile(
+      onTap: () => abrir(epi),
+      leading: Image.network(
+        '${ApiConfig.baseUrl}${epi.imagemUrl}',
+        width: 50,
+        height: 50,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) =>
+            const Icon(Icons.health_and_safety, size: 40, color: Colors.blue),
+      ),
+      title: Text(
+        epi.nome,
+        style: const TextStyle(fontWeight: FontWeight.bold),
+      ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(epi.categoria),
+          Text(
+            'CA: ${epi.ca} • ${epi.caVencido ? 'Vencido em' : 'Válido até'} ${epi.validadeFormatada}',
+            style: TextStyle(color: epi.caVencido ? Colors.red : null),
+          ),
+          if (admin) Text('Disponível: ${epi.quantidadeDisponivel} un.'),
+          if (!admin && (emPosse[epi.id] ?? 0) > 0)
+            Text(
+              'Em sua posse: ${emPosse[epi.id]} un.',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          if (!posse) const Text('Toque para consultar e solicitar'),
+        ],
+      ),
+      trailing: epi.caVencido
+          ? const Icon(Icons.warning_amber_rounded, color: Colors.red)
+          : null,
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: Text(admin ? 'Lista de EPIs' : 'EPIs da empresa e meus EPIs'),
+      backgroundColor: Colors.blue,
+      foregroundColor: Colors.white,
+    ),
+    body: FutureBuilder<void>(
+      future: dados,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(
+            child: ElevatedButton(
+              onPressed: atualizar,
+              child: const Text('Falha ao carregar EPIs. Tentar novamente'),
+            ),
+          );
+        }
+        final filtrados = epis
+            .where(
+              (epi) =>
+                  (!widget.apenasCaVencidos || epi.caVencido) &&
+                  (!widget.apenasEstoqueBaixo || epi.quantidadeDisponivel <= 2),
+            )
+            .toList();
+        final possuidos = epis
+            .where((epi) => (emPosse[epi.id] ?? 0) > 0)
+            .toList();
+        return RefreshIndicator(
+          onRefresh: atualizar,
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.all(16),
+            children: [
+              if (!admin) ...[
+                Text(
+                  'Meus EPIs em posse',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 8),
+                if (possuidos.isEmpty)
+                  const ListTile(title: Text('Você não possui EPIs em posse.')),
+                for (final epi in possuidos) card(epi, posse: true),
+                const SizedBox(height: 24),
+                Text(
+                  'EPIs fornecidos pela empresa',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 8),
+              ],
+              if (filtrados.isEmpty)
+                const ListTile(title: Text('Nenhum EPI cadastrado.')),
+              for (final epi in filtrados) card(epi),
+            ],
+          ),
+        );
+      },
+    ),
+  );
 }
 </file>
 
@@ -2957,12 +3949,14 @@ class EpiScreen extends StatelessWidget {
 import 'package:flutter/material.dart';
 
 import '../models/funcionario.dart';
+import '../models/usuario.dart';
 import '../models/treinamento_realizado.dart';
 import '../services/funcionario_service.dart';
 import '../services/treinamento_Service.dart';
 
 class FuncionarioScreen extends StatelessWidget {
-  const FuncionarioScreen({super.key});
+  final Usuario usuario;
+  const FuncionarioScreen({super.key, required this.usuario});
 
   void _mostrarTreinamentos(BuildContext context, Funcionario funcionario) {
     final realizadosFuture = TreinamentoService().buscarRealizados(
@@ -3047,6 +4041,16 @@ class FuncionarioScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (usuario.perfil.trim().toUpperCase() != 'ADMIN') {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Acesso restrito')),
+        body: const Center(
+          child: Text(
+            'Apenas administradores podem acessar a lista de funcionários.',
+          ),
+        ),
+      );
+    }
     return Scaffold(
       appBar: AppBar(
         title: const Text('Lista de Funcionários'),
@@ -3066,7 +4070,7 @@ class FuncionarioScreen extends StatelessWidget {
 
       body: FutureBuilder<List<Funcionario>>(
         // Busca os dados da API
-        future: FuncionarioService().buscarFuncionarios(),
+        future: FuncionarioService().buscarFuncionarios(usuario.id),
         builder: (context, snapshot) {
           // Exibe indicador enquanto aguarda os dados
           if (snapshot.connectionState == ConnectionState.waiting) {
@@ -3117,6 +4121,235 @@ class FuncionarioScreen extends StatelessWidget {
       ),
     );
   }
+}
+</file>
+
+<file path="lib/src/screens/historico_funcionario_screen.dart">
+import 'package:flutter/material.dart';
+
+import '../models/usuario.dart';
+import '../models/resumo_funcionario.dart';
+import '../services/resumo_funcionario_service.dart';
+
+enum ConsultaFuncionario {
+  emPosse,
+  solicitados,
+  historicoEpis,
+  historicoTreinamentos,
+}
+
+class HistoricoFuncionarioScreen extends StatefulWidget {
+  final Usuario usuario;
+  final ConsultaFuncionario consulta;
+  const HistoricoFuncionarioScreen({
+    super.key,
+    required this.usuario,
+    required this.consulta,
+  });
+
+  @override
+  State<HistoricoFuncionarioScreen> createState() =>
+      _HistoricoFuncionarioScreenState();
+}
+
+class _HistoricoFuncionarioScreenState
+    extends State<HistoricoFuncionarioScreen> {
+  late Future<ResumoFuncionario> dados;
+  final busca = TextEditingController();
+  DateTimeRange? periodo;
+  bool get historico =>
+      widget.consulta == ConsultaFuncionario.historicoEpis ||
+      widget.consulta == ConsultaFuncionario.historicoTreinamentos;
+  String get titulo => switch (widget.consulta) {
+    ConsultaFuncionario.emPosse => 'Meus EPIs em posse',
+    ConsultaFuncionario.solicitados => 'Empréstimos solicitados',
+    ConsultaFuncionario.historicoEpis => 'Histórico de EPIs recebidos',
+    ConsultaFuncionario.historicoTreinamentos => 'Histórico de treinamentos',
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    dados = carregar();
+  }
+
+  Future<ResumoFuncionario> carregar() =>
+      ResumoFuncionarioService().buscar(widget.usuario.id);
+  @override
+  void dispose() {
+    busca.dispose();
+    super.dispose();
+  }
+
+  Future<void> atualizar() async {
+    final futuro = carregar();
+    setState(() {
+      dados = futuro;
+    });
+    try {
+      await futuro;
+    } catch (_) {
+      /* Exibido no FutureBuilder. */
+    }
+  }
+
+  bool corresponde(String nome, DateTime data) {
+    final dia = DateTime(data.year, data.month, data.day);
+    return nome.toLowerCase().contains(busca.text.trim().toLowerCase()) &&
+        (periodo == null ||
+            (!dia.isBefore(periodo!.start) && !dia.isAfter(periodo!.end)));
+  }
+
+  String data(DateTime valor) =>
+      '${valor.day.toString().padLeft(2, '0')}/${valor.month.toString().padLeft(2, '0')}/${valor.year}';
+
+  Future<void> escolherPeriodo() async {
+    final selecionado = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(1900),
+      lastDate: DateTime.now(),
+      initialDateRange: periodo,
+    );
+    if (selecionado != null && mounted) setState(() => periodo = selecionado);
+  }
+
+  List<Widget> registros(ResumoFuncionario resumo) {
+    if (widget.consulta == ConsultaFuncionario.emPosse) {
+      final porId = {for (final e in resumo.emPosse) e.epi.id: e.epi};
+      return [
+        for (final entrada in resumo.quantidadesEmPosse.entries)
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.health_and_safety),
+              title: Text(porId[entrada.key]!.nome),
+              subtitle: Text('CA: ${porId[entrada.key]!.ca}'),
+              trailing: Text('${entrada.value} un.'),
+            ),
+          ),
+      ];
+    }
+    if (widget.consulta == ConsultaFuncionario.historicoTreinamentos) {
+      final lista =
+          resumo.realizados
+              .where((r) => corresponde(r.treinamento.titulo, r.dataConclusao))
+              .toList()
+            ..sort((a, b) => b.dataConclusao.compareTo(a.dataConclusao));
+      return [
+        for (final r in lista)
+          Card(
+            child: ListTile(
+              leading: Icon(
+                r.estaVencido ? Icons.warning_amber : Icons.school,
+                color: r.estaVencido ? Colors.orange : Colors.green,
+              ),
+              title: Text(r.treinamento.titulo),
+              subtitle: Text(
+                'Conclusão: ${r.dataFormatada}\n${r.dataVencimento == null ? 'Sem prazo de validade' : '${r.estaVencido ? 'Vencido em' : 'Válido até'} ${r.dataVencimentoFormatada}'}',
+              ),
+            ),
+          ),
+      ];
+    }
+    final lista =
+        (widget.consulta == ConsultaFuncionario.solicitados
+                ? resumo.solicitados
+                : resumo.recebidos)
+            .where((e) => corresponde(e.epi.nome, e.dataEmprestimo))
+            .toList()
+          ..sort((a, b) => b.dataEmprestimo.compareTo(a.dataEmprestimo));
+    return [
+      for (final e in lista)
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.assignment),
+            title: Text(e.epi.nome),
+            subtitle: Text(
+              'Solicitado em: ${data(e.dataEmprestimo)} • 1 un.\nStatus: ${e.status}${e.dataDevolucao == null ? '' : '\nDevolvido em: ${data(e.dataDevolucao!)}'}${e.observacao.isEmpty ? '' : '\nMotivo: ${e.observacao}'}',
+            ),
+          ),
+        ),
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: Text(titulo)),
+    body: FutureBuilder<ResumoFuncionario>(
+      future: dados,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(
+            child: ElevatedButton(
+              onPressed: atualizar,
+              child: const Text('Falha ao carregar. Tentar novamente'),
+            ),
+          );
+        }
+        final itens = registros(snapshot.requireData);
+        return RefreshIndicator(
+          onRefresh: atualizar,
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            padding: const EdgeInsets.all(16),
+            children: [
+              if (historico)
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Form(
+                    child: Column(
+                      children: [
+                        TextFormField(
+                          controller: busca,
+                          onChanged: (_) => setState(() {}),
+                          decoration: const InputDecoration(
+                            labelText: 'Buscar por nome',
+                            prefixIcon: Icon(Icons.search),
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 12,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: escolherPeriodo,
+                              icon: const Icon(Icons.date_range),
+                              label: Text(
+                                periodo == null
+                                    ? 'Todo o período'
+                                    : '${data(periodo!.start)} a ${data(periodo!.end)}',
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () => setState(() {
+                                busca.clear();
+                                periodo = null;
+                              }),
+                              child: const Text('Limpar filtros'),
+                            ),
+                          ],
+                        ),
+                        Text(
+                          widget.consulta == ConsultaFuncionario.historicoEpis
+                              ? 'Inclui EPIs em posse e devolvidos. O período usa a data da solicitação registrada no sistema.'
+                              : 'Todas as conclusões, incluindo renovações e registros vencidos.',
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              if (itens.isEmpty)
+                const ListTile(title: Text('Nenhum registro encontrado.')),
+              ...itens,
+            ],
+          ),
+        );
+      },
+    ),
+  );
 }
 </file>
 
@@ -3241,6 +4474,8 @@ import 'package:flutter/material.dart';
 
 import 'epi_screen.dart';
 import 'dashboard_screen.dart';
+import 'dashboard_funcionario_screen.dart';
+import 'solicitacoes_screen.dart';
 import 'funcionario_screen.dart';
 import 'meus_emprestimos_screen.dart';
 import 'cadastrar_treinamento_screen.dart';
@@ -3272,8 +4507,8 @@ class _MainScreenState extends State<MainScreen> {
       appBar: AppBar(
         title: Text(
           usuario.perfil.trim().toUpperCase() == 'ADMIN'
-              ? 'Dashboard'
-              : 'Empréstimos de EPIs',
+              ? 'Empréstimos de EPIs'
+              : 'Meu painel',
         ),
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
@@ -3296,10 +4531,7 @@ class _MainScreenState extends State<MainScreen> {
 
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: Text(
-                'Menu Principal',
-                style: TextStyle(fontSize: 22),
-              ),
+              child: Text('Menu Principal', style: TextStyle(fontSize: 22)),
             ),
             ListTile(
               leading: const Icon(Icons.home),
@@ -3362,17 +4594,30 @@ class _MainScreenState extends State<MainScreen> {
               },
             ),
 
-            // Exercício 1d: nova opção no menu lateral
-            ListTile(
-              leading: const Icon(Icons.book),
-              title: const Text('Lista de Funcionários'),
-              onTap: () {
-                abrir(
+            if (usuario.perfil.trim().toUpperCase() == 'ADMIN')
+              ListTile(
+                leading: const Icon(Icons.pending_actions),
+                title: const Text('Solicitações e empréstimos'),
+                onTap: () => abrir(
                   context,
-                  MaterialPageRoute(builder: (_) => const FuncionarioScreen()),
-                );
-              },
-            ),
+                  MaterialPageRoute(
+                    builder: (_) => SolicitacoesScreen(usuario: usuario),
+                  ),
+                ),
+              ),
+            if (usuario.perfil.trim().toUpperCase() == 'ADMIN')
+              ListTile(
+                leading: const Icon(Icons.book),
+                title: const Text('Lista de Funcionários'),
+                onTap: () {
+                  abrir(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => FuncionarioScreen(usuario: usuario),
+                    ),
+                  );
+                },
+              ),
             ListTile(
               leading: const Icon(Icons.logout, color: Colors.red),
               title: const Text('Sair'),
@@ -3390,11 +4635,9 @@ class _MainScreenState extends State<MainScreen> {
 
       body: usuario.perfil.trim().toUpperCase() == 'ADMIN'
           ? DashboardScreen(key: ValueKey(revisao), usuario: usuario)
-          : Center(
-              child: Text(
-                'Bem-vindo ${usuario.nome}',
-                style: const TextStyle(fontSize: 18),
-              ),
+          : DashboardFuncionarioScreen(
+              key: ValueKey(revisao),
+              usuario: usuario,
             ),
     );
   }
@@ -3565,6 +4808,240 @@ class _EmprestimoCard extends StatelessWidget {
 }
 </file>
 
+<file path="lib/src/screens/solicitacoes_screen.dart">
+import 'package:flutter/material.dart';
+
+import '../models/emprestimo.dart';
+import '../models/usuario.dart';
+import '../services/emprestimo_service.dart';
+
+class SolicitacoesScreen extends StatefulWidget {
+  final Usuario usuario;
+  final String statusInicial;
+  const SolicitacoesScreen({
+    super.key,
+    required this.usuario,
+    this.statusInicial = 'SOLICITADO',
+  });
+  @override
+  State<SolicitacoesScreen> createState() => _SolicitacoesScreenState();
+}
+
+class _SolicitacoesScreenState extends State<SolicitacoesScreen> {
+  late Future<List<Emprestimo>> dados;
+  late String status;
+  int? processando;
+  @override
+  void initState() {
+    super.initState();
+    status = widget.statusInicial;
+    if (widget.usuario.perfil.trim().toUpperCase() == 'ADMIN') {
+      dados = carregar();
+    }
+  }
+
+  Future<List<Emprestimo>> carregar() =>
+      EmprestimoService().buscarTodos(widget.usuario.id);
+  Future<void> atualizar() async {
+    final futuro = carregar();
+    setState(() {
+      dados = futuro;
+    });
+    try {
+      await futuro;
+    } catch (_) {
+      /* O FutureBuilder mostra a falha. */
+    }
+  }
+
+  Future<void> movimentar(Emprestimo e) async {
+    final devolver = e.status == 'EMPRESTADO';
+    final confirmou = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(devolver ? 'Registrar devolução' : 'Aprovar solicitação'),
+        content: Text(
+          '${devolver ? 'Confirmar a devolução' : 'Confirmar a entrega'} de ${e.epi.nome} para ${e.funcionarioNome ?? 'o funcionário'}?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Confirmar'),
+          ),
+        ],
+      ),
+    );
+    if (confirmou != true || !mounted) return;
+    setState(() {
+      processando = e.id;
+    });
+    try {
+      await EmprestimoService().movimentar(
+        e.id,
+        widget.usuario.id,
+        devolver: devolver,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            devolver ? 'Devolução registrada.' : 'Solicitação aprovada.',
+          ),
+        ),
+      );
+      await atualizar();
+    } catch (erro) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(erro.toString().replaceFirst('Exception: ', '')),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          processando = null;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.usuario.perfil.trim().toUpperCase() != 'ADMIN') {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Acesso restrito')),
+        body: const Center(
+          child: Text('Apenas administradores podem gerenciar solicitações.'),
+        ),
+      );
+    }
+    return Scaffold(
+      appBar: AppBar(title: const Text('Solicitações e empréstimos')),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: DropdownButtonFormField<String>(
+              initialValue: status,
+              decoration: const InputDecoration(
+                labelText: 'Status',
+                border: OutlineInputBorder(),
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: 'SOLICITADO',
+                  child: Text('Solicitações pendentes'),
+                ),
+                DropdownMenuItem(
+                  value: 'EMPRESTADO',
+                  child: Text('EPIs emprestados'),
+                ),
+                DropdownMenuItem(
+                  value: 'DEVOLVIDO',
+                  child: Text('EPIs devolvidos'),
+                ),
+              ],
+              onChanged: (valor) {
+                if (valor != null) {
+                  setState(() {
+                    status = valor;
+                  });
+                }
+              },
+            ),
+          ),
+          Expanded(
+            child: FutureBuilder<List<Emprestimo>>(
+              future: dados,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                if (snapshot.hasError) {
+                  return Center(
+                    child: ElevatedButton(
+                      onPressed: atualizar,
+                      child: const Text('Falha ao carregar. Tentar novamente'),
+                    ),
+                  );
+                }
+                final itens = snapshot.requireData
+                    .where((e) => e.status == status)
+                    .toList();
+                return RefreshIndicator(
+                  onRefresh: atualizar,
+                  child: ListView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.all(16),
+                    children: itens.isEmpty
+                        ? [
+                            const ListTile(
+                              title: Text('Nenhum registro neste status.'),
+                            ),
+                          ]
+                        : [
+                            for (final e in itens)
+                              Card(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        e.epi.nome,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .titleMedium,
+                                      ),
+                                      Text(
+                                        'Funcionário: ${e.funcionarioNome ?? 'Não informado'}',
+                                      ),
+                                      Text('Status: ${e.status}'),
+                                      if (e.observacao.isNotEmpty)
+                                        Text('Motivo: ${e.observacao}'),
+                                      if (e.status != 'DEVOLVIDO')
+                                        Align(
+                                          alignment: Alignment.centerRight,
+                                          child: FilledButton.icon(
+                                            onPressed: processando == null
+                                                ? () => movimentar(e)
+                                                : null,
+                                            icon: Icon(
+                                              e.status == 'SOLICITADO'
+                                                  ? Icons.check
+                                                  : Icons.assignment_return,
+                                            ),
+                                            label: Text(
+                                              e.status == 'SOLICITADO'
+                                                  ? 'Aprovar'
+                                                  : 'Registrar devolução',
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                          ],
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+</file>
+
 <file path="lib/src/screens/treinamentos_Screen.dart">
 import 'package:app_epi/src/models/treinamento.dart';
 import 'package:app_epi/src/services/treinamento_Service.dart';
@@ -3577,8 +5054,13 @@ import '../services/api_config.dart';
 
 class TreinamentosScreen extends StatefulWidget {
   final Usuario usuario;
+  final bool apenasPendentes;
 
-  const TreinamentosScreen({super.key, required this.usuario});
+  const TreinamentosScreen({
+    super.key,
+    required this.usuario,
+    this.apenasPendentes = false,
+  });
 
   @override
   State<TreinamentosScreen> createState() => _TreinamentosScreenState();
@@ -3690,7 +5172,11 @@ class _TreinamentosScreenState extends State<TreinamentosScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Treinamentos de Segurança'),
+        title: Text(
+          widget.apenasPendentes
+              ? 'Treinamentos pendentes / vencidos'
+              : 'Treinamentos de Segurança',
+        ),
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
       ),
@@ -3709,6 +5195,15 @@ class _TreinamentosScreenState extends State<TreinamentosScreen> {
 
           final total = treinamentos.length;
           final feitos = concluidos.values.where((r) => !r.estaVencido).length;
+          final lista = widget.apenasPendentes
+              ? treinamentos
+                    .where(
+                      (t) =>
+                          concluidos[t.id] == null ||
+                          concluidos[t.id]!.estaVencido,
+                    )
+                    .toList()
+              : treinamentos;
 
           return Column(
             children: [
@@ -3740,111 +5235,121 @@ class _TreinamentosScreenState extends State<TreinamentosScreen> {
               ),
               // Lista de treinamentos
               Expanded(
-                child: ListView.builder(
-                  itemCount: treinamentos.length,
-                  itemBuilder: (context, index) {
-                    final t = treinamentos[index];
-                    final registro = concluidos[t.id];
-                    final vencido = registro?.estaVencido ?? false;
-                    final concluido = registro != null && !vencido;
+                child: lista.isEmpty
+                    ? const Center(
+                        child: Text('Nenhum treinamento pendente ou vencido.'),
+                      )
+                    : ListView.builder(
+                        itemCount: lista.length,
+                        itemBuilder: (context, index) {
+                          final t = lista[index];
+                          final registro = concluidos[t.id];
+                          final vencido = registro?.estaVencido ?? false;
+                          final concluido = registro != null && !vencido;
 
-                    return Card(
-                      elevation: 3,
-                      margin: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 5,
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Icon(
-                                  vencido
-                                      ? Icons.warning_amber_rounded
-                                      : concluido
-                                      ? Icons.check_circle
-                                      : Icons.school,
-                                  color: vencido
-                                      ? Colors.red
-                                      : concluido
-                                      ? Colors.green
-                                      : Colors.blue,
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Text(
-                                    t.titulo,
-                                    style: const TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              ],
+                          return Card(
+                            elevation: 3,
+                            margin: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 5,
                             ),
-                            const SizedBox(height: 6),
-                            Text(t.descricao ?? ''),
-                            const SizedBox(height: 10),
-
-                            // Wrap quebra a linha se não couber na tela
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                if (t.arquivoUrl != null)
-                                  OutlinedButton.icon(
-                                    onPressed: () => abrirMaterial(t),
-                                    icon: const Icon(Icons.picture_as_pdf),
-                                    label: const Text('Material'),
-                                  ),
-                                if (concluido)
-                                  Chip(
-                                    avatar: const Icon(
-                                      Icons.check,
-                                      color: Colors.green,
-                                    ),
-                                    label: Text(
-                                      'Concluído em ${registro.dataFormatada}',
-                                    ),
-                                    backgroundColor: Colors.green.shade50,
-                                  )
-                                else ...[
-                                  if (registro != null && vencido)
-                                    Chip(
-                                      avatar: const Icon(
-                                        Icons.warning_amber_rounded,
-                                        color: Colors.red,
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        vencido
+                                            ? Icons.warning_amber_rounded
+                                            : concluido
+                                            ? Icons.check_circle
+                                            : Icons.school,
+                                        color: vencido
+                                            ? Colors.red
+                                            : concluido
+                                            ? Colors.green
+                                            : Colors.blue,
                                       ),
-                                      label: const Text('Vencido – refazer'),
-                                      backgroundColor: Colors.red.shade50,
-                                    ),
-                                  if (registro != null && vencido)
-                                    Text(
-                                      'Última conclusão em ${registro.dataFormatada}',
-                                    ),
-                                  ElevatedButton.icon(
-                                    onPressed: processandoId == null
-                                        ? () => marcarConcluido(t)
-                                        : null,
-                                    icon: const Icon(Icons.task_alt),
-                                    label: const Text('Marcar como Concluido'),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.green,
-                                      foregroundColor: Colors.white,
-                                    ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Text(
+                                          t.titulo,
+                                          style: const TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(t.descricao ?? ''),
+                                  const SizedBox(height: 10),
+
+                                  // Wrap quebra a linha se não couber na tela
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      if (t.arquivoUrl != null)
+                                        OutlinedButton.icon(
+                                          onPressed: () => abrirMaterial(t),
+                                          icon: const Icon(
+                                            Icons.picture_as_pdf,
+                                          ),
+                                          label: const Text('Material'),
+                                        ),
+                                      if (concluido)
+                                        Chip(
+                                          avatar: const Icon(
+                                            Icons.check,
+                                            color: Colors.green,
+                                          ),
+                                          label: Text(
+                                            'Concluído em ${registro.dataFormatada}',
+                                          ),
+                                          backgroundColor: Colors.green.shade50,
+                                        )
+                                      else ...[
+                                        if (registro != null && vencido)
+                                          Chip(
+                                            avatar: const Icon(
+                                              Icons.warning_amber_rounded,
+                                              color: Colors.red,
+                                            ),
+                                            label: const Text(
+                                              'Vencido – refazer',
+                                            ),
+                                            backgroundColor: Colors.red.shade50,
+                                          ),
+                                        if (registro != null && vencido)
+                                          Text(
+                                            'Última conclusão em ${registro.dataFormatada}',
+                                          ),
+                                        ElevatedButton.icon(
+                                          onPressed: processandoId == null
+                                              ? () => marcarConcluido(t)
+                                              : null,
+                                          icon: const Icon(Icons.task_alt),
+                                          label: const Text(
+                                            'Marcar como Concluido',
+                                          ),
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: Colors.green,
+                                            foregroundColor: Colors.white,
+                                          ),
+                                        ),
+                                      ],
+                                    ],
                                   ),
                                 ],
-                              ],
+                              ),
                             ),
-                          ],
-                        ),
+                          );
+                        },
                       ),
-                    );
-                  },
-                ),
               ),
             ],
           );
@@ -3901,99 +5406,101 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../models/dashboard.dart';
 import 'api_config.dart';
 
 class DashboardService {
-  Future<dynamic> _buscar(int adminId, String caminho) async {
-    final uri = Uri.parse('${ApiConfig.baseUrl}/dashboard$caminho')
+  Future<Dashboard> buscar(int adminId) async {
+    final uri = Uri.parse('${ApiConfig.baseUrl}/dashboard')
         .replace(queryParameters: {'adminId': '$adminId'});
-    final resposta = await http.get(uri).timeout(const Duration(seconds: 15));
-    if (resposta.statusCode != 200) {
-      throw Exception(
-        'Não foi possível consultar o painel (${resposta.statusCode}).',
+    final response = await http.get(uri).timeout(const Duration(seconds: 15));
+    if (response.statusCode == 200) {
+      return Dashboard.fromJson(
+        jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>,
       );
     }
-    return jsonDecode(utf8.decode(resposta.bodyBytes));
-  }
-
-  Future<Map<String, int>> buscarIndicadores(int adminId) async {
-    final json = await _buscar(adminId, '') as Map<String, dynamic>;
-    const chaves = [
-      'caVencidos',
-      'pedidosPendentes',
-      'episEmprestados',
-      'treinamentosPendentes',
-    ];
-    return {for (final chave in chaves) chave: _contagem(json[chave])};
-  }
-
-  int _contagem(dynamic valor) {
-    if (valor is! int || valor < 0) {
-      throw const FormatException('Indicador inválido na resposta da API');
+    if (response.statusCode == 403) {
+      throw Exception('Apenas administradores podem ver o painel');
     }
-    return valor;
-  }
-
-  Future<List<Map<String, dynamic>>> buscarDetalhes(
-    int adminId,
-    String indicador,
-  ) async {
-    final json = await _buscar(adminId, '/$indicador') as List;
-    return json.map((item) => Map<String, dynamic>.from(item as Map)).toList();
+    throw Exception(
+      'Não foi possível carregar o painel (${response.statusCode}).',
+    );
   }
 }
 </file>
 
 <file path="lib/src/services/emprestimo_service.dart">
 import 'dart:convert';
+
 import 'package:http/http.dart' as http;
+
 import '../models/emprestimo.dart';
 import 'api_config.dart';
 
 class EmprestimoService {
+  Future<List<Emprestimo>> buscarTodos(int adminId) async {
+    final uri = Uri.parse('${ApiConfig.baseUrl}/emprestimos')
+        .replace(queryParameters: {'adminId': '$adminId'});
+    final response = await http.get(uri).timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) {
+      throw Exception(utf8.decode(response.bodyBytes));
+    }
+    return (jsonDecode(utf8.decode(response.bodyBytes)) as List)
+        .map((item) => Emprestimo.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
 
-Future<List<Emprestimo>> buscarPorFuncionario(int id) async {
-	final response = await http.get(
-		Uri.parse('${ApiConfig.baseUrl}/emprestimos/funcionario/$id'),
-	);
+  Future<void> movimentar(int id, int adminId, {required bool devolver}) async {
+    final acao = devolver ? 'devolver' : 'aprovar';
+    final uri = Uri.parse('${ApiConfig.baseUrl}/emprestimos/$id/$acao')
+        .replace(queryParameters: {'adminId': '$adminId'});
+    final response = await http.put(uri).timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) {
+      throw Exception(utf8.decode(response.bodyBytes));
+    }
+  }
 
-	if (response.statusCode == 200) {
-		final lista = jsonDecode(utf8.decode(response.bodyBytes)) as List<dynamic>;
-		return lista
-				.map((item) => Emprestimo.fromJson(item as Map<String, dynamic>))
-				.toList();
-	}
+  Future<List<Emprestimo>> buscarPorFuncionario(int id) async {
+    final response = await http.get(
+      Uri.parse('${ApiConfig.baseUrl}/emprestimos/funcionario/$id'),
+    );
 
-	throw Exception('Erro ao carregar seus empréstimos');
-}
+    if (response.statusCode == 200) {
+      final lista =
+          jsonDecode(utf8.decode(response.bodyBytes)) as List<dynamic>;
+      return lista
+          .map((item) => Emprestimo.fromJson(item as Map<String, dynamic>))
+          .toList();
+    }
 
-// Envia a solicitação de empréstimo para a API
-Future<void> solicitar({
-required int funcionarioId,
-required int epiId,
-required String observacao,
-}) async {
-final response = await http.post(
-Uri.parse('${ApiConfig.baseUrl}/emprestimos'),
-headers: {
-'Content-Type' : 'application/json',
-},
-// Mesmo formato da entidade Emprestimo do Java:
-// funcionário e EPI vão "dentro" do pedido, só com o id
-body: jsonEncode({
-'funcionario': {'id': funcionarioId},
-'epi': {'id' : epiId},
-'observacao' : observacao,
-}),
-);
+    throw Exception('Erro ao carregar seus empréstimos');
+  }
 
-// 201 = Created: o empréstimo foi gravado
-if (response. statusCode == 201) {
-return;
-}
-// 400: a API explica o motivo (CA vencido, sem estoque ... )
-throw Exception(utf8.decode(response.bodyBytes));
-}
+  // Envia a solicitação de empréstimo para a API
+  Future<void> solicitar({
+    required int funcionarioId,
+    required int epiId,
+    required String observacao,
+  }) async {
+    final response = await http.post(
+      Uri.parse('${ApiConfig.baseUrl}/emprestimos'),
+      headers: {'Content-Type': 'application/json'},
+      // Mesmo formato da entidade Emprestimo do Java:
+      // funcionário e EPI vão "dentro" do pedido, só com o id
+      body: jsonEncode({
+        'funcionario': {'id': funcionarioId},
+        'epi': {'id': epiId},
+        'observacao': observacao,
+      }),
+    );
+
+    // 201 = Created: o empréstimo foi gravado
+    if (response.statusCode == 201) {
+      return;
+    }
+    // 400: a API explica o motivo (CA vencido, sem estoque ... )
+    throw Exception(utf8.decode(response.bodyBytes));
+  }
 }
 </file>
 
@@ -4037,39 +5544,57 @@ class EpiService {
 
 <file path="lib/src/services/funcionario_service.dart">
 import 'dart:convert'; // Trabalha com JSON
+
 import 'package:http/http.dart' as http; // Faz requisições HTTP
 
 import '../models/funcionario.dart';
 import 'api_config.dart';
 
 class FuncionarioService {
-
   // Busca a lista de funcionários na API
-  Future<List<Funcionario>> buscarFuncionarios() async {
-
+  Future<List<Funcionario>> buscarFuncionarios(int adminId) async {
     // Faz uma requisição GET para o endpoint /funcionarios
-    final response =
-        await http.get(Uri.parse('${ApiConfig.baseUrl}/funcionarios'));
+    final response = await http.get(
+      Uri.parse('${ApiConfig.baseUrl}/funcionarios')
+          .replace(queryParameters: {'adminId': '$adminId'}),
+    );
 
     // Verifica se a requisição foi bem-sucedida
     if (response.statusCode == 200) {
-
       // Converte o JSON recebido em uma lista Dart
       // (utf8.decode garante os acentos: Manutenção, Produção...)
-      List<dynamic> lista =
-          json.decode(utf8.decode(response.bodyBytes));
+      List<dynamic> lista = json.decode(utf8.decode(response.bodyBytes));
 
       // Transforma cada item da lista em um objeto Funcionario
-      return lista
-          .map((item) => Funcionario.fromJson(item))
-          .toList();
-
+      return lista.map((item) => Funcionario.fromJson(item)).toList();
     } else {
-
       // Lança uma exceção em caso de erro
       throw Exception('Erro ao carregar funcionários');
-
     }
+  }
+}
+</file>
+
+<file path="lib/src/services/resumo_funcionario_service.dart">
+import '../models/emprestimo.dart';
+import '../models/resumo_funcionario.dart';
+import '../models/treinamento.dart';
+import '../models/treinamento_realizado.dart';
+import 'emprestimo_service.dart';
+import 'treinamento_Service.dart';
+
+class ResumoFuncionarioService {
+  Future<ResumoFuncionario> buscar(int funcionarioId) async {
+    final resultados = await Future.wait<Object>([
+      EmprestimoService().buscarPorFuncionario(funcionarioId),
+      TreinamentoService().buscarTreinamentos(),
+      TreinamentoService().buscarRealizados(funcionarioId),
+    ]);
+    return ResumoFuncionario(
+      emprestimos: resultados[0] as List<Emprestimo>,
+      treinamentos: resultados[1] as List<Treinamento>,
+      realizados: resultados[2] as List<TreinamentoRealizado>,
+    );
   }
 }
 </file>
@@ -4174,48 +5699,68 @@ import 'package:flutter/material.dart';
 
 class IndicadorCard extends StatelessWidget {
   final String titulo;
-  final int quantidade;
+  final int valor;
   final IconData icone;
-  final Color cor;
-  final VoidCallback onTap;
+  final MaterialColor cor;
+  final VoidCallback? onTap;
 
   const IndicadorCard({
     super.key,
     required this.titulo,
-    required this.quantidade,
+    required this.valor,
     required this.icone,
     required this.cor,
-    required this.onTap,
+    this.onTap,
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(icone, color: cor, size: 32),
-              const SizedBox(height: 12),
-              Text(
-                '$quantidade',
-                style: Theme.of(context).textTheme.headlineLarge
-                    ?.copyWith(color: cor, fontWeight: FontWeight.bold),
+  Widget build(BuildContext context) => Card(
+    elevation: 2,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: cor.shade50,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icone, color: cor.shade700, size: 24),
+                ),
+                const Spacer(),
+                if (onTap != null)
+                  Icon(Icons.chevron_right, color: Colors.grey.shade400),
+              ],
+            ),
+            Text(
+              '$valor',
+              style: TextStyle(
+                fontSize: 30,
+                fontWeight: FontWeight.bold,
+                color: cor.shade800,
               ),
-              const SizedBox(height: 8),
-              Text(titulo, style: Theme.of(context).textTheme.titleMedium),
-              const Spacer(),
-              const Text('Ver detalhes →'),
-            ],
-          ),
+            ),
+            Text(
+              titulo,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 14, color: Colors.grey.shade700),
+            ),
+          ],
         ),
       ),
-    );
-  }
+    ),
+  );
 }
 </file>
 
@@ -6232,6 +7777,489 @@ class RunnerTests: XCTestCase {
 **/xcuserdata/
 </file>
 
+<file path="test/dashboard_aula7_test.dart">
+import 'dart:convert';
+
+import 'package:app_epi/src/models/usuario.dart';
+import 'package:app_epi/src/screens/dashboard_screen.dart';
+import 'package:app_epi/src/services/dashboard_service.dart';
+import 'package:app_epi/src/widgets/indicador_card.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+
+final admin = Usuario(
+  id: 1,
+  matricula: '1001',
+  nome: 'Ana Souza',
+  setor: 'Segurança',
+  perfil: 'ADMIN',
+);
+Map<String, int> indicadores({int vencidos = 1, int solicitados = 1}) => {
+  'episCadastrados': 8,
+  'episEmprestados': 2,
+  'episDevolvidos': 1,
+  'caVencidos': vencidos,
+  'solicitacoesPendentes': solicitados,
+  'treinamentosPendentes': 10,
+  'funcionariosCadastrados': 3,
+  'estoqueBaixo': 2,
+};
+
+void main() {
+  for (final largura in [320.0, 699.0, 700.0, 1200.0]) {
+    testWidgets('Aula 7: colunas e cards sem overflow em $largura pixels', (
+      tester,
+    ) async {
+      tester.view.physicalSize = Size(largura, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await http.runWithClient(
+        () async {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(body: DashboardScreen(usuario: admin)),
+            ),
+          );
+          await tester.pumpAndSettle();
+          final grid = tester.widget<GridView>(find.byType(GridView));
+          expect(
+            (grid.gridDelegate as SliverGridDelegateWithFixedCrossAxisCount)
+                .crossAxisCount,
+            largura >= 700 ? 3 : 2,
+          );
+          expect(find.textContaining('Retire de uso'), findsOneWidget);
+          expect(find.text('EPIs cadastrados'), findsOneWidget);
+          expect(tester.takeException(), isNull);
+          await tester.drag(find.byType(ListView), const Offset(0, -2200));
+          await tester.pumpAndSettle();
+          expect(find.text('Funcionários cadastrados'), findsOneWidget);
+          expect(find.text('Estoque baixo'), findsOneWidget);
+          expect(find.textContaining('Atualizado às'), findsOneWidget);
+          expect(tester.takeException(), isNull);
+        },
+        () => MockClient(
+          (_) async => http.Response(jsonEncode(indicadores()), 200),
+        ),
+      );
+    });
+  }
+
+  testWidgets('Alerta de CA não aparece quando a contagem é zero', (
+    tester,
+  ) async {
+    await http.runWithClient(
+      () async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(body: DashboardScreen(usuario: admin)),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.textContaining('Retire de uso'), findsNothing);
+      },
+      () => MockClient(
+        (_) async => http.Response(jsonEncode(indicadores(vencidos: 0)), 200),
+      ),
+    );
+  });
+
+  testWidgets('Card sem ação não exibe seta', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 200,
+            height: 220,
+            child: IndicadorCard(
+              titulo: 'Treinamentos pendentes',
+              valor: 10,
+              icone: Icons.school,
+              cor: Colors.orange,
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(find.byIcon(Icons.chevron_right), findsNothing);
+    expect(find.text('10'), findsOneWidget);
+  });
+
+  test(
+    'Funcionário recebe mensagem de acesso restrito no dashboard gerencial',
+    () async {
+      await http.runWithClient(
+        () async {
+          await expectLater(
+            DashboardService().buscar(2),
+            throwsA(
+              isA<Exception>().having(
+                (e) => e.toString(),
+                'mensagem',
+                contains('Apenas administradores'),
+              ),
+            ),
+          );
+        },
+        () => MockClient(
+          (_) async =>
+              http.Response('Apenas administradores podem ver o painel', 403),
+        ),
+      );
+    },
+  );
+
+  testWidgets('Aprovar, devolver e voltar atualiza os indicadores', (
+    tester,
+  ) async {
+    var status = 'SOLICITADO';
+    var consultas = 0;
+    final client = MockClient((request) async {
+      expect(request.url.queryParameters['adminId'], '1');
+      if (request.url.path == '/dashboard') {
+        consultas++;
+        final dados = indicadores(
+          vencidos: 0,
+          solicitados: status == 'SOLICITADO' ? 1 : 0,
+        );
+        dados['episDevolvidos'] = status == 'DEVOLVIDO' ? 2 : 1;
+        return http.Response(jsonEncode(dados), 200);
+      }
+      if (request.method == 'PUT') {
+        status = request.url.path.endsWith('/aprovar')
+            ? 'EMPRESTADO'
+            : 'DEVOLVIDO';
+        return http.Response('{}', 200);
+      }
+      return http.Response(
+        jsonEncode([
+          {
+            'id': 9,
+            'status': status,
+            'dataEmprestimo': '2026-11-01',
+            'funcionario': {'nome': 'Bruno'},
+            'epi': {
+              'id': 1,
+              'nome': 'Capacete',
+              'categoria': 'Proteção',
+              'ca': '123',
+              'imagemUrl': '',
+              'quantidadeDisponivel': 3,
+              'validadeCa': '2099-01-01',
+              'caVencido': false,
+            },
+          },
+        ]),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    await http.runWithClient(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: DashboardScreen(usuario: admin)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Solicitações pendentes'));
+      await tester.tap(find.text('Solicitações pendentes'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Aprovar'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Confirmar'));
+      await tester.pumpAndSettle();
+      expect(status, 'EMPRESTADO');
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(consultas, 2);
+      final pendentes = tester.widget<IndicadorCard>(
+        find.ancestor(
+          of: find.text('Solicitações pendentes'),
+          matching: find.byType(IndicadorCard),
+        ),
+      );
+      expect(pendentes.valor, 0);
+      await tester.ensureVisible(find.text('EPIs emprestados'));
+      await tester.tap(find.text('EPIs emprestados'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Registrar devolução'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Confirmar'));
+      await tester.pumpAndSettle();
+      expect(status, 'DEVOLVIDO');
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(consultas, 3);
+    }, () => client);
+  });
+}
+</file>
+
+<file path="test/funcionario_dashboard_test.dart">
+import 'dart:convert';
+
+import 'package:app_epi/src/models/usuario.dart';
+import 'package:app_epi/src/screens/main_screen.dart';
+import 'package:app_epi/src/screens/epi_screen.dart';
+import 'package:app_epi/src/screens/historico_funcionario_screen.dart';
+import 'package:app_epi/src/services/resumo_funcionario_service.dart';
+import 'package:app_epi/src/widgets/indicador_card.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+
+final usuario = Usuario(
+  id: 7,
+  matricula: '007',
+  nome: 'Ana',
+  setor: 'Produção',
+  perfil: 'FUNCIONARIO',
+);
+Map<String, dynamic> epi(int id, String nome) => {
+  'id': id,
+  'nome': nome,
+  'categoria': 'Proteção',
+  'ca': '123',
+  'imagemUrl': '/imagem.png',
+  'quantidadeDisponivel': 987,
+  'validadeCa': '2099-12-31',
+  'caVencido': false,
+};
+Map<String, dynamic> emprestimo(
+  int id,
+  String status,
+  int epiId,
+  String nome,
+) => {
+  'id': id,
+  'status': status,
+  'dataEmprestimo': '2025-01-01',
+  'dataDevolucao': status == 'DEVOLVIDO' ? '2025-02-01' : null,
+  'epi': epi(epiId, nome),
+};
+final treinamentos = [
+  {'id': 1, 'titulo': 'NR 06', 'validadeMeses': 12},
+  {'id': 2, 'titulo': 'NR 35', 'validadeMeses': null},
+  {'id': 3, 'titulo': 'Integração', 'validadeMeses': null},
+];
+
+MockClient cliente({void Function(Uri)? aoConsultar}) => MockClient((
+  request,
+) async {
+  aoConsultar?.call(request.url);
+  final caminho = request.url.path;
+  Object corpo;
+  if (caminho == '/emprestimos/funcionario/7') {
+    corpo = [
+      emprestimo(1, 'EMPRESTADO', 1, 'Capacete'),
+      emprestimo(2, 'EMPRESTADO', 1, 'Capacete'),
+      emprestimo(3, 'DEVOLVIDO', 2, 'Luva'),
+      emprestimo(4, 'SOLICITADO', 2, 'Luva'),
+      emprestimo(5, 'REJEITADO', 2, 'Luva'),
+    ];
+  } else if (caminho == '/treinamentos') {
+    corpo = treinamentos;
+  } else if (caminho == '/treinamentos/realizados/funcionario/7') {
+    corpo = [
+      {'id': 1, 'treinamento': treinamentos[0], 'dataConclusao': '2000-01-01'},
+      {'id': 2, 'treinamento': treinamentos[1], 'dataConclusao': '2024-01-01'},
+      {'id': 3, 'treinamento': treinamentos[1], 'dataConclusao': '2025-01-01'},
+    ];
+  } else if (caminho == '/epis') {
+    corpo = [epi(1, 'Capacete'), epi(2, 'Luva')];
+  } else if (caminho == '/dashboard') {
+    corpo = {
+      'caVencidos': 0,
+      'episCadastrados': 0,
+      'episDevolvidos': 0,
+      'solicitacoesPendentes': 0,
+      'funcionariosCadastrados': 0,
+      'estoqueBaixo': 0,
+      'episEmprestados': 0,
+      'treinamentosPendentes': 0,
+    };
+  } else {
+    throw StateError('Consulta inesperada: $caminho');
+  }
+  return http.Response(
+    jsonEncode(corpo),
+    200,
+    headers: {'content-type': 'application/json; charset=utf-8'},
+  );
+});
+
+void main() {
+  test('Resumo separa posse, solicitações e recebimentos e usa conclusão mais recente', () async {
+    await http.runWithClient(() async {
+      final resumo = await ResumoFuncionarioService().buscar(7);
+      expect(resumo.emPosse.length, 2);
+      expect(resumo.quantidadesEmPosse, {1: 2});
+      expect(resumo.solicitados.length, 1);
+      expect(resumo.recebidos.length, 3);
+      expect(resumo.pendentes.map((t) => t.id), [1, 3]);
+      expect(resumo.realizados.length, 3);
+      expect(resumo.ultimasConclusoes[2]!.id, 3);
+    }, () => cliente());
+  });
+
+  testWidgets(
+    'Funcionário vê dois cards da Aula 7 e não tem lista de funcionários no menu',
+    (tester) async {
+      await http.runWithClient(() async {
+        await tester.pumpWidget(
+          MaterialApp(home: MainScreen(usuario: usuario)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Meus EPIs em uso'), findsOneWidget);
+        expect(find.text('Meus treinamentos pendentes'), findsOneWidget);
+        expect(find.byType(IndicadorCard), findsNWidgets(2));
+        expect(find.text('Histórico de EPIs recebidos'), findsOneWidget);
+        expect(find.text('Histórico de treinamentos'), findsOneWidget);
+        await tester.tap(find.byTooltip('Open navigation menu'));
+        await tester.pumpAndSettle();
+        await tester.drag(
+          find.descendant(
+            of: find.byType(Drawer),
+            matching: find.byType(ListView),
+          ),
+          const Offset(0, -400),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Lista de Funcionários'), findsNothing);
+      }, () => cliente());
+    },
+  );
+
+  testWidgets('Administrador mantém acesso à lista de funcionários', (
+    tester,
+  ) async {
+    final admin = Usuario(
+      id: 1,
+      matricula: '001',
+      nome: 'Admin',
+      setor: 'Segurança',
+      perfil: 'ADMIN',
+    );
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MaterialApp(home: MainScreen(usuario: admin)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Open navigation menu'));
+      await tester.pumpAndSettle();
+      await tester.drag(
+        find.descendant(
+          of: find.byType(Drawer),
+          matching: find.byType(ListView),
+        ),
+        const Offset(0, -400),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Lista de Funcionários'), findsOneWidget);
+    }, () => cliente());
+  });
+
+  testWidgets(
+    'Catálogo oculta estoque da empresa e mostra quantidade em posse',
+    (tester) async {
+      await http.runWithClient(() async {
+        await tester.pumpWidget(MaterialApp(home: EpiScreen(usuario: usuario)));
+        await tester.pumpAndSettle();
+        expect(find.text('Em sua posse: 2 un.'), findsWidgets);
+        expect(find.textContaining('987'), findsNothing);
+        expect(find.text('EPIs fornecidos pela empresa'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      }, () => cliente());
+    },
+  );
+
+  testWidgets(
+    'Histórico de recebimentos exclui solicitações e permite buscar',
+    (tester) async {
+      await http.runWithClient(() async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: HistoricoFuncionarioScreen(
+              usuario: usuario,
+              consulta: ConsultaFuncionario.historicoEpis,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('Capacete'), findsNWidgets(2));
+        expect(find.widgetWithText(ListTile, 'Luva'), findsOneWidget);
+        expect(find.textContaining('SOLICITADO'), findsNothing);
+        await tester.enterText(find.byType(TextFormField), 'Luva');
+        await tester.pumpAndSettle();
+        expect(find.text('Capacete'), findsNothing);
+        expect(find.widgetWithText(ListTile, 'Luva'), findsOneWidget);
+      }, () => cliente());
+    },
+  );
+
+  testWidgets('Histórico de treinamentos preserva todas as conclusões', (
+    tester,
+  ) async {
+    await http.runWithClient(() async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: HistoricoFuncionarioScreen(
+            usuario: usuario,
+            consulta: ConsultaFuncionario.historicoTreinamentos,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('NR 35'), findsNWidgets(2));
+      expect(find.text('NR 06'), findsOneWidget);
+      expect(find.textContaining('Vencido em'), findsOneWidget);
+    }, () => cliente());
+  });
+
+  testWidgets('Card de treinamentos abre somente pendentes e vencidos', (
+    tester,
+  ) async {
+    await http.runWithClient(() async {
+      await tester.pumpWidget(MaterialApp(home: MainScreen(usuario: usuario)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Meus treinamentos pendentes'));
+      await tester.pumpAndSettle();
+      expect(find.text('NR 06'), findsOneWidget);
+      expect(find.text('Integração'), findsOneWidget);
+      expect(find.text('NR 35'), findsNothing);
+      expect(find.text('Vencido – refazer'), findsOneWidget);
+    }, () => cliente());
+  });
+
+  testWidgets('Retorno dos detalhes atualiza os números do painel', (
+    tester,
+  ) async {
+    var consultas = 0;
+    await http.runWithClient(
+      () async {
+        await tester.pumpWidget(
+          MaterialApp(home: MainScreen(usuario: usuario)),
+        );
+        await tester.pumpAndSettle();
+        expect(consultas, 1);
+        await tester.tap(find.text('Meus EPIs em uso'));
+        await tester.pumpAndSettle();
+        expect(find.text('2 un.'), findsOneWidget);
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+        expect(consultas, 3); // Painel, detalhes e atualização ao voltar.
+      },
+      () => cliente(
+        aoConsultar: (uri) {
+          if (uri.path == '/emprestimos/funcionario/7') consultas++;
+        },
+      ),
+    );
+  });
+}
+</file>
+
 <file path="test/widget_test.dart">
 import 'package:app_epi/main.dart';
 import 'package:app_epi/src/services/dashboard_service.dart';
@@ -6245,30 +8273,34 @@ void main() {
     expect(find.text('Login'), findsOneWidget);
     expect(find.text('Entrar'), findsOneWidget);
   });
-  test('Dashboard consulta os quatro indicadores em uma requisição', () async {
-    var chamadas = 0;
-    final client = MockClient((request) async {
-      chamadas++;
-      expect(request.url.path, '/dashboard');
-      expect(request.url.queryParameters['adminId'], '1');
-      return http.Response(
-        '{"caVencidos":2,"pedidosPendentes":3,"episEmprestados":4,"treinamentosPendentes":5}',
-        200,
-      );
-    });
-    await http.runWithClient(() async {
-      final dados = await DashboardService().buscarIndicadores(1);
-      expect(dados['treinamentosPendentes'], 5);
-      expect(dados.length, 4);
-    }, () => client);
-    expect(chamadas, 1);
-  });
+  test(
+    'Dashboard consulta indicadores da aula e exercícios em uma requisição',
+    () async {
+      var chamadas = 0;
+      final client = MockClient((request) async {
+        chamadas++;
+        expect(request.url.path, '/dashboard');
+        expect(request.url.queryParameters['adminId'], '1');
+        return http.Response(
+          '{"episCadastrados":8,"episEmprestados":2,"episDevolvidos":1,"caVencidos":1,"solicitacoesPendentes":1,"treinamentosPendentes":10,"funcionariosCadastrados":3,"estoqueBaixo":2}',
+          200,
+        );
+      });
+      await http.runWithClient(() async {
+        final dados = await DashboardService().buscar(1);
+        expect(dados.treinamentosPendentes, 10);
+        expect(dados.episCadastrados, 8);
+        expect(dados.episDevolvidos, 1);
+        expect(dados.solicitacoesPendentes, 1);
+        expect(dados.funcionariosCadastrados, 3);
+        expect(dados.estoqueBaixo, 2);
+      }, () => client);
+      expect(chamadas, 1);
+    },
+  );
   test('Resposta incompleta não vira indicador zero', () async {
     await http.runWithClient(() async {
-      await expectLater(
-        DashboardService().buscarIndicadores(1),
-        throwsFormatException,
-      );
+      await expectLater(DashboardService().buscar(1), throwsFormatException);
     }, () => MockClient((_) async => http.Response('{}', 200)));
   });
 }
@@ -7656,50 +9688,110 @@ linter:
 </file>
 
 <file path="DASHBOARD.md">
-# Dashboard do Técnico
+# Dashboard — Aula 7
 
-A tela inicial exibe o painel para usuários com perfil `ADMIN`. Os demais perfis mantêm a mensagem de boas-vindas e o menu existente.
+A implementação segue o PDF **Flutter API Java - App de Empréstimo de EPIs - Aula 7**. Em divergências com a versão anterior, prevalecem o contrato, a fórmula e a estrutura da aula.
 
-## API
+## Correspondência com o PDF
 
-O controller foi instalado em `../api_epi/src/main/java/com/senac/api_epi/controllers/DashboardController.java`. Uma cópia do código está em [backend/DashboardController.java](backend/DashboardController.java).
+| Etapa | Implementação |
+| --- | --- |
+| 1 — Contagens nos repositórios | `countByStatus`, `countByValidadeCaBefore` e `count()` na API |
+| 2 — Service Java | [DashboardService.java](../api_epi/src/main/java/com/senac/api_epi/service/DashboardService.java), com autorização ADMIN e `LinkedHashMap<String, Long>` |
+| 3 — Controller Java | [DashboardController.java](../api_epi/src/main/java/com/senac/api_epi/controllers/DashboardController.java), com resposta 200 ou 403 |
+| 4 — Conferência dos números | Consultas SQL diretas comparadas com a API e [SQL de conferência](backend/conferir_dashboard.sql) |
+| 5 — Model Flutter | [dashboard.dart](lib/src/models/dashboard.dart), com os nomes exatos das chaves Java |
+| 6 — Service Flutter | [dashboard_service.dart](lib/src/services/dashboard_service.dart), método `buscar(adminId)` |
+| 7 — Card reutilizável | [indicador_card.dart](lib/src/widgets/indicador_card.dart), com `valor`, `MaterialColor`, círculo colorido e `onTap` opcional |
+| 8 — Dashboard | [dashboard_screen.dart](lib/src/screens/dashboard_screen.dart), sem Scaffold, alerta de CA, data e horário de atualização |
+| 9 — Tela inicial | [main_screen.dart](lib/src/screens/main_screen.dart), com o painel gerencial no body do ADMIN |
+| Exercícios 1 e 2 | Cards de funcionários cadastrados e estoque baixo, com navegação |
+| Exercício 3 | [dashboard_funcionario_screen.dart](lib/src/screens/dashboard_funcionario_screen.dart), com os dois cards pessoais da aula |
 
-Reinicie a API depois de compilar com JDK 17 ou superior. O aplicativo usa a URL definida em [api_config.dart](lib/src/services/api_config.dart).
+## Contrato da API
 
-`GET /dashboard?adminId=1` retorna um `Map<String, Long>`, sem DTO ou nova entidade:
+`GET /dashboard?adminId=1` retorna os seis indicadores da aula e os dois dos exercícios, na ordem de inserção do `LinkedHashMap`. Sem DTO ou entidade nova para o dashboard:
 
 ```json
 {
-  "caVencidos": 2,
-  "pedidosPendentes": 3,
-  "episEmprestados": 4,
-  "treinamentosPendentes": 5
+  "episCadastrados": 8,
+  "episEmprestados": 0,
+  "episDevolvidos": 0,
+  "caVencidos": 1,
+  "solicitacoesPendentes": 3,
+  "treinamentosPendentes": 14,
+  "funcionariosCadastrados": 3,
+  "estoqueBaixo": 1
 }
 ```
 
-Cada indicador é calculado por `count` no banco. As listas completas são consultadas apenas ao abrir os detalhes em `GET /dashboard/{indicador}?adminId=1`.
+Esses números foram conferidos no banco local em 11/11/2026; variam conforme os dados. A chave antiga `pedidosPendentes` foi substituída por `solicitacoesPendentes`, conforme o PDF. O endpoint antigo de detalhes do dashboard foi substituído pela navegação para as telas de EPIs, solicitações e funcionários.
 
-## Regras
+Todos os indicadores são calculados por contagens no banco. Não são carregadas listas completas para calcular os números do administrador.
 
-- CA vencido: cadastro de EPI com validade anterior ao dia atual do servidor. CA que vence hoje ainda é válido, conforme a regra existente da entidade Epi. O indicador conta cadastros, não unidades em estoque.
-- Pedidos aguardando aprovação: empréstimos em `SOLICITADO`.
-- EPIs com funcionários: empréstimos em `EMPRESTADO`. Cada registro representa um EPI, pois a entidade não contém quantidade por empréstimo.
-- Treinamentos pendentes: pares funcionário/treinamento sem registro de conclusão. Todos os treinamentos são considerados obrigatórios para todos os funcionários de perfil diferente de ADMIN. `NOT EXISTS` evita descontar conclusões duplicadas. Não inclui administradores ou reciclagens por validade, pois a API atual não armazena validade de treinamento.
+### Regras da aula
 
-Os cards abrem as listas dos registros que compõem cada contagem. Ao voltar dos detalhes ou das telas abertas pelo menu, o painel consulta os números novamente. Também há botão Atualizar, gesto de puxar para atualizar, carregamento e opção de tentar novamente após erro. Respostas incompletas não são convertidas em zeros.
+- EPIs cadastrados: `epiRepository.count()`.
+- EPIs emprestados/devolvidos: empréstimos com status `EMPRESTADO`/`DEVOLVIDO`.
+- CA vencidos: validade anterior ao dia atual; CA que vence hoje permanece válido nesse dia.
+- Solicitações pendentes: status `SOLICITADO`.
+- Treinamentos pendentes: **todos os funcionários × treinamentos − registros de conclusão**, incluindo administradores no total de funcionários, como no PDF. Esse indicador não representa reciclagens vencidas por pessoa.
+- Funcionários cadastrados: `funcionarioRepository.count()`.
+- Estoque baixo: EPIs com quantidade disponível menor ou igual a 2, incluindo estoque zero.
 
-## Avaliação do cenário da Ana
+Adaptação ao histórico de renovações já existente: o resultado da fórmula de treinamentos tem piso zero. A aula pressupõe uma conclusão por funcionário/treinamento, enquanto este projeto preserva várias conclusões por renovação. A fórmula da aula permanece; se houver muitas renovações, ela não representa a quantidade exata de pessoas ainda sem primeira conclusão.
 
-O painel permite consultar as quatro perguntas em uma única tela, desde que Ana tenha perfil ADMIN e os status estejam atualizados. A API existente ainda não oferece aprovação/devolução de empréstimos; as telas de detalhes deste painel são consultas. Para completar o fluxo operacional, será necessário implementar essas transições com controle de estoque.
+## Interface e navegação
 
-O parâmetro adminId segue o padrão de autorização existente no projeto, conferindo o perfil no banco. Ele não é autenticação por sessão ou token; para implantação com usuários reais, a API deve obter a identidade autenticada no servidor.
+O administrador vê os seis cards da aula e os dois exercícios. A grade usa duas colunas abaixo de 700 pixels e três a partir de 700, com `shrinkWrap` e rolagem pela lista externa. A proporção segue 0,95 no celular e 1,6 no computador, com altura mínima adicional para evitar overflow em telas estreitas ou com texto ampliado.
 
-## Validação
+O alerta vermelho com ícone e texto aparece apenas quando há CA vencido. O rodapé mostra o horário da última consulta bem-sucedida e o botão Atualizar. Puxar para atualizar e retornar de uma tela também consultam os números novamente.
 
-- `flutter test`: login, consulta dos quatro números em uma única requisição e rejeição de resposta incompleta.
-- `flutter analyze`: sem erros; dois avisos informativos anteriores sobre nomes de arquivos com letras maiúsculas.
-- API: `mvnw.cmd -DskipTests compile` com JDK 24, compilando para Java 17.
-- A execução das consultas contra MySQL e a conferência com dados reais ainda precisam ser validadas no ambiente em funcionamento.
+- EPIs cadastrados: catálogo da empresa.
+- CA vencidos: catálogo filtrado por CA vencido.
+- Estoque baixo: catálogo filtrado por quantidade <= 2.
+- Solicitações pendentes: gerenciamento no status SOLICITADO.
+- EPIs emprestados/devolvidos: gerenciamento no status correspondente.
+- Funcionários cadastrados: lista de funcionários, restrita ao ADMIN.
+- Treinamentos pendentes: indicador informativo, sem ação de toque, como no PDF; por isso não mostra seta.
+
+## Aprovação e devolução
+
+A aula referencia uma tela de solicitações da Aula 5 que não existia neste projeto. Foi criada [solicitacoes_screen.dart](lib/src/screens/solicitacoes_screen.dart), acessível pelos cards e pelo menu ADMIN, com seleção de status e confirmação das ações.
+
+- `GET /emprestimos?adminId=1`: listagem gerencial.
+- `PUT /emprestimos/{id}/aprovar?adminId=1`: aceita apenas SOLICITADO, verifica CA e estoque, desconta uma unidade e altera para EMPRESTADO.
+- `PUT /emprestimos/{id}/devolver?adminId=1`: aceita apenas EMPRESTADO, devolve uma unidade ao estoque, grava a data de devolução e altera para DEVOLVIDO.
+
+As operações conferem ADMIN no banco e usam transação e bloqueios no empréstimo e no EPI. Repetir a mesma ação é rejeitado, evitando estoque duplicado ou negativo. As solicitações pessoais existentes continuam funcionando. Cada registro de empréstimo representa uma unidade.
+
+## Funcionário e funcionalidades anteriores
+
+Conforme o exercício 3, o funcionário vê dois cards: **Meus EPIs em uso** e **Meus treinamentos pendentes**. Os registros vencidos entram nas pendências pessoais, usando a conclusão mais recente. Ao abrir o card de treinamentos, permanecem disponíveis material e conclusão/renovação.
+
+As solicitações pessoais e os dois históricos solicitados anteriormente permanecem como opções de consulta abaixo dos cards. [Os históricos](lib/src/screens/historico_funcionario_screen.dart) têm filtros por nome e intervalo de datas, inicialmente sem restrição de período. EPIs recebidos incluem EMPRESTADO e DEVOLVIDO, sem contar pedidos ainda não entregues. O período desse histórico usa a data da solicitação, pois o modelo não registra data efetiva de entrega. O histórico de treinamentos mantém todas as conclusões e renovações.
+
+O catálogo do funcionário oculta o estoque da empresa na lista e nos detalhes, mantém a solicitação de EPIs e mostra as quantidades pessoais em posse. A lista de funcionários permanece exclusiva do ADMIN na interface e em `GET /funcionarios?adminId=...`.
+
+`validadeMeses`, adicionado anteriormente, continua disponível: nulo indica ausência de vencimento; valores informados devem ser positivos. Renovar um treinamento vencido cria outra conclusão sem apagar registros antigos. Treinamentos que vencem hoje permanecem válidos durante o dia.
+
+O desafio extra da aula é uma proposta de evolução: uma relação entre setor e treinamento obrigatório permitiria contar obrigações por setor. Ela não foi aplicada, para preservar a fórmula e a regra de todos os funcionários fazerem todos os treinamentos exigidas nesta aula.
+
+## Executar e verificar
+
+Reinicie a API na porta 8080 usando JDK 17 ou superior (a validação foi feita com JDK 24, compilando para Java 17). A URL do app permanece em [api_config.dart](lib/src/services/api_config.dart). A API já aberta na porta 8080 ainda estava executando a versão antiga durante a validação; a versão nova foi verificada temporariamente na porta 18080.
+
+Os arquivos Java em [backend/](backend/) são cópias dos arquivos aplicados à API vizinha. O projeto já usa `spring.jpa.hibernate.ddl-auto=update`; o campo de validade de treinamento foi criado ao iniciar a versão atualizada.
+
+Validações realizadas:
+
+- Testes Flutter: contrato JSON, acesso por perfil, colunas em 320/699/700/1200 pixels, alerta condicional, card sem ação, fluxo de aprovação/devolução com atualização ao voltar e funcionalidades pessoais anteriores.
+- API: 14 testes para contrato e fórmula da aula, autorização, estoque, transições de status e renovação de treinamentos.
+- MySQL existente: os oito números do JSON coincidiram com consultas SQL diretas.
+- HTTP real: ADMIN recebeu os indicadores; funcionário recebeu 403 no dashboard, listagem de funcionários e listagem gerencial de empréstimos.
+- As transições de aprovação/devolução foram verificadas em testes automatizados, sem movimentar os pedidos reais do banco durante a conferência HTTP.
+
+A identidade continua seguindo o padrão da documentação: `adminId` informado na requisição e perfil conferido no banco. O projeto não possui autenticação de API por token/sessão.
 </file>
 
 <file path="pubspec.lock">
